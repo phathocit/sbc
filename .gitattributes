@@ -1,4 +1,7 @@
 * text=auto eol=lf
+# The TypeScript and TSX files in this repository are application source, not generated output.
+*.ts -linguist-generated
+*.tsx -linguist-generated
 *.png binary
 *.jpg binary
 *.jpeg binary

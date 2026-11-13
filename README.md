@@ -51,8 +51,8 @@ The API owns authentication, tenant authorization, booking rules, billing state 
 
 ### Setup
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 pnpm install
 docker compose up -d postgres
 pnpm build:runtime-packages

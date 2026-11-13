@@ -1,0 +1,33 @@
+# Dependencies and build output
+node_modules/
+.next/
+dist/
+coverage/
+.turbo/
+.pnpm-store/
+*.tsbuildinfo
+*.log
+playwright-report/
+test-results/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local database exports and backups
+*.dump
+*.backup
+*.sql.gz
+backups/
+
+# Agent conversation and workflow state is private project context
+.agent/
+.agents/
+AGENTS.md
+AGENT_IMPLEMENTATION_BLUEPRINT.md
+
+# Internal planning drafts are not part of the public portfolio
+docs/superpowers/

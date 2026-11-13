@@ -1,0 +1,31 @@
+{
+	"compilerOptions": {
+		"module": "commonjs",
+		"declaration": true,
+		"removeComments": true,
+		"emitDecoratorMetadata": true,
+		"experimentalDecorators": true,
+		"allowSyntheticDefaultImports": true,
+		"target": "ES2022",
+		"sourceMap": true,
+		"rootDir": "./src",
+		"outDir": "./dist",
+		"incremental": false,
+		"skipLibCheck": true,
+		"strictNullChecks": true,
+		"noImplicitAny": true,
+		"strictBindCallApply": true,
+		"forceConsistentCasingInFileNames": true,
+		"noFallthroughCasesInSwitch": true,
+		"baseUrl": "./",
+		"paths": {
+			"@/*": ["./src/*"],
+			"@config/*": ["./src/config/*"],
+			"@modules/*": ["./src/modules/*"],
+			"@common/*": ["./src/common/*"],
+			"@sbc/contracts": ["../../packages/contracts/dist/index.d.ts"],
+			"@sbc/database": ["../../packages/database/dist/index.d.ts"]
+		}
+	},
+	"include": ["src/**/*.ts"]
+}

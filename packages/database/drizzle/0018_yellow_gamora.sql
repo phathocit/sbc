@@ -1,0 +1,2 @@
+ALTER TABLE "tenants" ADD COLUMN "theme_key" varchar(40);--> statement-breakpoint
+ALTER TABLE "tenants" ADD CONSTRAINT "tenants_theme_key_valid" CHECK ("tenants"."theme_key" is null or "tenants"."theme_key" in ('blueberry-cream', 'peach-soda', 'matcha-latte', 'lavender-pop', 'strawberry-milk', 'minty-fresh', 'coral-bloom', 'lemon-sorbet', 'cotton-candy'));

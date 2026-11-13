@@ -1,0 +1,28 @@
+CREATE TABLE "tenant_telegram_integrations" (
+	"tenant_id" uuid PRIMARY KEY NOT NULL,
+	"bot_token_ciphertext" text NOT NULL,
+	"bot_token_iv" varchar(32) NOT NULL,
+	"bot_token_auth_tag" varchar(32) NOT NULL,
+	"bot_username" varchar(64),
+	"chat_id" varchar(32),
+	"chat_title" varchar(255),
+	"chat_type" varchar(16),
+	"enabled" boolean DEFAULT false NOT NULL,
+	"status" varchar(24) DEFAULT 'saved' NOT NULL,
+	"last_checked_at" timestamp with time zone,
+	"last_verified_at" timestamp with time zone,
+	"last_error_code" varchar(64),
+	"last_delivery_at" timestamp with time zone,
+	"last_delivery_status" varchar(16),
+	"last_delivery_error_code" varchar(64),
+	"pairing_code_hash" varchar(64),
+	"pairing_expires_at" timestamp with time zone,
+	"candidate_chats" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"last_discovery_at" timestamp with time zone,
+	"polling_until" timestamp with time zone,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "tenant_telegram_integrations_status_check" CHECK ("status" in ('saved', 'verified', 'failed')),
+	CONSTRAINT "tenant_telegram_integrations_chat_type_check" CHECK ("chat_type" is null or "chat_type" in ('group', 'supergroup')),
+	CONSTRAINT "tenant_telegram_integrations_tenant_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id") ON DELETE cascade ON UPDATE no action
+);
+CREATE INDEX "tenant_telegram_integrations_enabled_idx" ON "tenant_telegram_integrations" USING btree ("enabled", "status");

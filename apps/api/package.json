@@ -1,0 +1,33 @@
+{
+	"name": "@service-business-cloud/api",
+	"version": "0.1.0",
+	"private": true,
+	"scripts": {
+		"dev": "tsx watch -r tsconfig-paths/register src/main.ts",
+		"build": "nest build && tsc-alias",
+		"start": "node dist/main.js"
+	},
+	"dependencies": {
+		"@nestjs/common": "^11.0.0",
+		"@nestjs/config": "^4.0.0",
+		"@nestjs/core": "^11.0.0",
+		"@nestjs/platform-express": "^11.0.0",
+		"@sbc/contracts": "workspace:*",
+		"@sbc/database": "workspace:*",
+		"drizzle-orm": "^0.44.7",
+		"nodemailer": "6.10.1",
+		"postgres": "^3.4.7",
+		"reflect-metadata": "^0.2.2",
+		"rxjs": "^7.8.1"
+	},
+	"devDependencies": {
+		"@nestjs/cli": "^11.0.0",
+		"@types/express": "^5.0.0",
+		"@types/node": "^22.0.0",
+		"@types/nodemailer": "6.4.17",
+		"tsc-alias": "^1.9.10",
+		"tsconfig-paths": "^4.2.0",
+		"tsx": "^4.23.15",
+		"typescript": "^5.7.0"
+	}
+}

@@ -1,0 +1,209 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1793762447220,
+      "tag": "0000_great_prima",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793770000000,
+      "tag": "0001_catalog_staff_scheduling",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793780000000,
+      "tag": "0002_booking_engine",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793790000000,
+      "tag": "0003_guest_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793880000000,
+      "tag": "0004_platform_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793966400000,
+      "tag": "0005_outbox_worker",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794000000000,
+      "tag": "0006_tenant_applications",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794050000000,
+      "tag": "0007_public_tenant_onboarding",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794060000000,
+      "tag": "0008_billing_and_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794070000000,
+      "tag": "0009_auth_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794080000000,
+      "tag": "0010_plan_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794090000000,
+      "tag": "0011_dynamic_requested_plans",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794130000000,
+      "tag": "0012_platform_notification_reads",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1794131137528,
+      "tag": "0013_user_account_activation",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794156906670,
+      "tag": "0014_payment_reconciliations",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1794219900545,
+      "tag": "0015_kind_fixer",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1794278866144,
+      "tag": "0016_hard_genesis",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1794291691728,
+      "tag": "0017_handy_speed",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794294952097,
+      "tag": "0018_yellow_gamora",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794296124367,
+      "tag": "0019_striped_mister_sinister",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794304214292,
+      "tag": "0020_optional-booking-contact",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794390600000,
+      "tag": "0021_booking_service_note",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1794390700000,
+      "tag": "0022_booking_service_segments",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1794390800000,
+      "tag": "0023_tenant_telegram_integrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1794390900000,
+      "tag": "0024_support_tickets",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1794464138209,
+      "tag": "0025_tenant_booking_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1794484808425,
+      "tag": "0026_booking_confirmation_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1794486250882,
+      "tag": "0027_staged_booking_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1794571200000,
+      "tag": "0028_customer_abuse_lookup_indexes",
+      "breakpoints": true
+    }
+  ]
+}

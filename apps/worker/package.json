@@ -1,0 +1,23 @@
+{
+  "name": "@service-business-cloud/worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@sbc/database": "workspace:*",
+    "dotenv": "^16.6.1",
+    "drizzle-orm": "^0.44.7",
+    "nodemailer": "6.10.1",
+    "postgres": "^3.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/nodemailer": "6.4.17",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "service-business-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:runtime-packages": "pnpm --filter @sbc/contracts build && pnpm --filter @sbc/database build",
+    "dev": "pnpm build:runtime-packages && pnpm --parallel --filter @service-business-cloud/web --filter @service-business-cloud/api dev",
+    "dev:all": "pnpm build:runtime-packages && pnpm --parallel --filter @service-business-cloud/web --filter @service-business-cloud/api --filter @service-business-cloud/worker dev",
+    "dev:web": "pnpm --filter @service-business-cloud/web dev",
+    "dev:api": "pnpm build:runtime-packages && pnpm --filter @service-business-cloud/api dev",
+    "dev:worker": "pnpm build:runtime-packages && pnpm --filter @service-business-cloud/worker dev",
+    "build:worker": "pnpm --filter @service-business-cloud/worker build",
+    "start:worker": "pnpm --filter @service-business-cloud/worker start",
+    "db:generate": "pnpm --filter @sbc/database db:generate",
+    "db:migrate": "pnpm --filter @sbc/database db:migrate"
+  }
+}

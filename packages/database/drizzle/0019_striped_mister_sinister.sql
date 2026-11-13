@@ -1,0 +1,2 @@
+ALTER TABLE "tenants" ADD COLUMN "theme_mode" varchar(12) DEFAULT 'light' NOT NULL;--> statement-breakpoint
+ALTER TABLE "tenants" ADD CONSTRAINT "tenants_theme_mode_valid" CHECK ("tenants"."theme_mode" in ('light', 'dark'));

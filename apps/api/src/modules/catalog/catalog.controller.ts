@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import type { CreateServiceRequest, CreateStaffRequest, ServiceDto, StaffDto, UpdateServiceRequest, UpdateStaffRequest } from '@sbc/contracts';
 import { CurrentTenant, RequestTenantContext } from '../../common/decorators/current-tenant.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -21,7 +21,9 @@ export class CatalogController {
   @UseGuards(RolesGuard)
   @Roles('owner', 'admin', 'receptionist')
   createService(@CurrentTenant() context: RequestTenantContext, @Body() dto: CreateServiceRequest): Promise<ServiceDto> {
-    return this.catalog.createService(context.tenant.id, context.location.id, dto);
+    const locationId = context.location?.id;
+    if (!locationId) throw new BadRequestException('An active tenant location is required');
+    return this.catalog.createService(context.tenant.id, locationId, dto);
   }
 
   @Patch('services/:serviceId')
@@ -40,7 +42,9 @@ export class CatalogController {
   @UseGuards(RolesGuard)
   @Roles('owner', 'admin', 'receptionist')
   createStaff(@CurrentTenant() context: RequestTenantContext, @Body() dto: CreateStaffRequest): Promise<StaffDto> {
-    return this.catalog.createStaff(context.tenant.id, context.location.id, dto);
+    const locationId = context.location?.id;
+    if (!locationId) throw new BadRequestException('An active tenant location is required');
+    return this.catalog.createStaff(context.tenant.id, locationId, dto);
   }
 
   @Patch('staff/:staffId')

@@ -8,7 +8,7 @@ const statuses: Record<SupportTicketStatus, string> = { waiting_admin: 'Chờ Ze
 const categories = { billing: 'Thanh toán', account: 'Tài khoản', booking: 'Lịch hẹn', technical: 'Lỗi kỹ thuật', other: 'Khác' } as const;
 const dateTime = (value: string) => new Intl.DateTimeFormat('vi-VN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 
-export default function PlatformSupportPanel() {
+export default function PlatformSupportPanel({ initialTicketId = null }: { initialTicketId?: string | null }) {
   const [tickets, setTickets] = useState<SupportTicketDto[]>([]);
   const [selected, setSelected] = useState<SupportTicketDto | null>(null);
   const [status, setStatus] = useState('all');
@@ -36,6 +36,8 @@ export default function PlatformSupportPanel() {
   // load() intentionally refreshes when the filters change.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, search]);
+
+  useEffect(() => { if (initialTicketId) void openTicket(initialTicketId); }, [initialTicketId]);
 
   async function openTicket(id: string) {
     setError('');

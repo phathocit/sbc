@@ -38,7 +38,6 @@ export default function OnboardingPage() {
   useEffect(() => {
 
     void refresh().catch(() => router.replace('/login')).finally(() => setLoading(false));
-      .finally(() => setLoading(false));
   }, [refresh, router]);
 
   const handleNameChange = (value: string) => {

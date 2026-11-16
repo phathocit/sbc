@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api, type TenantTelegramGroupCandidates, type TenantTelegramIntegrationStatus, type TenantTelegramLinkCode } from '@/lib/api';
 import { formatWorkspaceDate } from '@/lib/workspace-date';
 import type { TelegramIntegrationTestDto } from '@sbc/contracts';
+import type { TenantTelegramDeliveryDto } from '@sbc/contracts';
 
 function statusText(status: NonNullable<TenantTelegramIntegrationStatus>['status']) {
   if (status === 'verified') return 'Đã kiểm tra';
@@ -31,6 +32,7 @@ export default function WorkspaceSettingsPage() {
   const [botToken, setBotToken] = useState('');
   const [linkCode, setLinkCode] = useState<TenantTelegramLinkCode | null>(null);
   const [candidates, setCandidates] = useState<TenantTelegramGroupCandidates['candidates']>([]);
+  const [deliveries, setDeliveries] = useState<TenantTelegramDeliveryDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -43,6 +45,7 @@ export default function WorkspaceSettingsPage() {
     void Promise.all([api.getCurrentTenant(id), api.getTenantTelegramIntegration(id)]).then(([context, integration]) => {
       setOwner(context.role === 'owner');
       setStatus(integration);
+      if (context.role === 'owner') void api.listTenantTelegramDeliveries(id).then(setDeliveries).catch(() => undefined);
     }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Không tải được cấu hình tích hợp.'))
       .finally(() => setLoading(false));
   }, []);
@@ -95,6 +98,7 @@ export default function WorkspaceSettingsPage() {
       const result = await api.testTenantTelegramIntegration(tenantId);
       setTestResult(result);
       setStatus(await api.getTenantTelegramIntegration(tenantId));
+      setDeliveries(await api.listTenantTelegramDeliveries(tenantId));
       setMessage(result.verified ? 'Kiểm tra thành công. Tin nhắn thử đã được gửi vào nhóm.' : 'Chưa xác nhận được khả năng gửi tin. Kiểm tra trạng thái và thử lại.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Không kiểm tra được tích hợp.');
@@ -107,6 +111,17 @@ export default function WorkspaceSettingsPage() {
     const nextEnabled = !status.enabled;
     const result = await runAction('toggle', () => api.setTenantTelegramEnabled(tenantId, nextEnabled));
     if (result && 'configured' in result) setMessage(nextEnabled ? 'Đã bật gửi thông báo Telegram.' : 'Đã tạm dừng gửi thông báo Telegram.');
+  }
+
+  async function retryDelivery(id: string) {
+    if (!tenantId || busy) return;
+    setBusy(`retry-${id}`); setError(''); setMessage('');
+    try {
+      await api.retryTenantTelegramDelivery(tenantId, id);
+      setMessage('Đã đưa thông báo vào hàng gửi lại.');
+      setDeliveries(await api.listTenantTelegramDeliveries(tenantId));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Không thể đưa thông báo vào hàng gửi lại.'); }
+    finally { setBusy(''); }
   }
 
   async function copyLinkCommand() {
@@ -133,7 +148,7 @@ export default function WorkspaceSettingsPage() {
         <span className={`owner-integration-state ${statusTone(status?.status ?? 'not_configured')}`}>{statusText(status?.status ?? 'not_configured')}<span aria-hidden="true">⌄</span></span>
       </summary>
       <div className="owner-integration-body">
-        <p className="owner-integration-intro">Thiết lập một lần để chủ tiệm nhận thông báo trong workspace và đồng bộ thông báo ngắn vào nhóm của tiệm. Nội dung gửi qua Telegram không bao gồm thông tin riêng của khách.</p>
+        <p className="owner-integration-intro">Thông báo lịch hẹn được đồng bộ vào nhóm. Tin nhắn gồm giờ, dịch vụ và nhân viên; không gửi số điện thoại hay ghi chú của khách.</p>
 
         <ol className="owner-telegram-steps">
           <li><strong>Tạo bot riêng cho tiệm</strong><span>Mở <b>@BotFather</b> trên Telegram, gửi <code>/newbot</code> và làm theo hướng dẫn. Sao chép bot token BotFather cấp.</span></li>
@@ -162,9 +177,17 @@ export default function WorkspaceSettingsPage() {
           {status.botUsername && <div><span>Bot</span><strong>@{status.botUsername}</strong></div>}
           {status.group && <div><span>Nhóm</span><strong>{status.group.title}</strong></div>}
           <div><span>Kiểm tra gần nhất</span><strong>{dateTime(status.lastCheckedAt) || 'Chưa kiểm tra'}</strong></div>
-          {status.lastDeliveryAt && <div><span>Thông báo gần nhất</span><strong>{status.lastDeliveryStatus === 'sent' ? 'Đã gửi' : 'Gửi thất bại'} · {dateTime(status.lastDeliveryAt)}</strong></div>}
+          {status.lastDeliveryAt && <div><span>Thông báo gần nhất</span><strong>{status.lastDeliveryStatus === 'sent' ? 'Telegram đã nhận' : 'Gửi thất bại'} · {dateTime(status.lastDeliveryAt)}</strong></div>}
           {status.lastErrorCode && <p role="status">Mã lỗi gần nhất: <code>{status.lastErrorCode}</code>. Kiểm tra token, quyền gửi tin của bot và nhóm đã liên kết.</p>}
           {status.lastDeliveryErrorCode && <p role="status">Lần gửi gần nhất chưa thành công: <code>{status.lastDeliveryErrorCode}</code>.</p>}
+        </section>}
+        {status?.configured && <section className="owner-telegram-deliveries" aria-label="Lịch sử gửi Telegram">
+          <div className="owner-telegram-link-heading"><div><h2>Lịch sử thông báo</h2><p>50 thông báo gần nhất gửi đến nhóm này.</p></div><button type="button" className="button button-quiet" disabled={busy !== ''} onClick={() => void api.listTenantTelegramDeliveries(tenantId).then(setDeliveries).catch((cause) => setError(cause instanceof Error ? cause.message : 'Không tải được lịch sử.'))}>Làm mới</button></div>
+          <div className="owner-telegram-delivery-list">{deliveries.map((delivery) => <article key={delivery.id}>
+            <span><strong>{delivery.title}</strong><small>{dateTime(delivery.createdAt)}{delivery.attempts ? ` · ${delivery.attempts} lần thử` : ''}</small>{delivery.errorCode && <small className="is-error">Mã lỗi: {delivery.errorCode}</small>}</span>
+            <span className={`owner-integration-state ${delivery.state === 'sent' ? 'is-ready' : delivery.state === 'failed' ? 'is-error' : 'is-pending'}`}>{delivery.state === 'sent' ? 'Telegram đã nhận' : delivery.state === 'failed' ? 'Thất bại' : delivery.state === 'retrying' ? 'Đang thử lại' : delivery.state === 'skipped' ? 'Đã bỏ qua' : 'Đang chờ'}</span>
+            {delivery.state === 'failed' && <button type="button" className="button button-secondary" disabled={busy !== '' || !status.enabled} onClick={() => void retryDelivery(delivery.id)}>{busy === `retry-${delivery.id}` ? 'Đang xếp lại…' : 'Gửi lại'}</button>}
+          </article>)}{deliveries.length === 0 && <p>Chưa có thông báo lịch hẹn nào được gửi.</p>}</div>
         </section>}
         {testResult && <p className={`owner-telegram-test-result ${testResult.verified ? 'is-success' : 'is-failure'}`} role="status">{testResult.verified ? `Đã gửi tin nhắn thử đến ${testResult.groupTitle || 'nhóm đã liên kết'} lúc ${dateTime(testResult.checkedAt)}.` : 'Không xác nhận được tin nhắn thử.'}</p>}
       </div>

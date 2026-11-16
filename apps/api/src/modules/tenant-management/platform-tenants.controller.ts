@@ -43,10 +43,10 @@ export class PlatformTenantsController {
   plans(): Promise<PlatformPlanDto[]> { return this.billing.listPlatformPlans(); }
 
   @Post('plans')
-  createPlanVersion(@Body() body: UpsertPlanRequest): Promise<PlatformPlanDto> { return this.billing.createPlanVersion(body); }
+  createPlanVersion(@CurrentUser() user: User, @Body() body: UpsertPlanRequest): Promise<PlatformPlanDto> { return this.billing.createPlanVersion(body, user.id); }
 
   @Patch('plans/:planId/archive')
-  archivePlan(@Param('planId', new ParseUUIDPipe()) planId: string): Promise<PlatformPlanDto> { return this.billing.archivePlanVersion(planId); }
+  archivePlan(@CurrentUser() user: User, @Param('planId', new ParseUUIDPipe()) planId: string): Promise<PlatformPlanDto> { return this.billing.archivePlanVersion(planId, user.id); }
 
   private billingFilters(query: Record<string, unknown>): PlatformBillingFilters {
     const numberParam = (key: string): number | undefined => {
@@ -64,6 +64,7 @@ export class PlatformTenantsController {
       planCode: typeof query.planCode === 'string' ? query.planCode : undefined,
       from: typeof query.from === 'string' ? query.from : undefined,
       to: typeof query.to === 'string' ? query.to : undefined,
+      needsAction: query.needsAction === 'true' || query.needsAction === '1',
       page: numberParam('page'), pageSize: numberParam('pageSize'),
     };
   }
@@ -148,8 +149,14 @@ export class PlatformTenantsController {
   }
 
   @Patch('tenants/:tenantId/status')
-  updateTenantStatus(@Param('tenantId', new ParseUUIDPipe()) tenantId: string, @Body() body: UpdateTenantStatusRequest): Promise<PlatformTenantDto> {
-    return this.management.updateTenantStatus(tenantId, body);
+  updateTenantStatus(@CurrentUser() user: User, @Param('tenantId', new ParseUUIDPipe()) tenantId: string, @Body() body: UpdateTenantStatusRequest): Promise<PlatformTenantDto> {
+    return this.management.updateTenantStatus(tenantId, user, body);
+  }
+
+  @Post('tenants/:tenantId/invitation/resend')
+  resendOwnerInvitation(@CurrentUser() user: User, @Param('tenantId', new ParseUUIDPipe()) tenantId: string,
+    @Body() body: { currentPassword: string }): Promise<{ queued: true }> {
+    return this.management.resendOwnerInvitation(tenantId, user, body?.currentPassword);
   }
 
   @Get('tenant-applications')

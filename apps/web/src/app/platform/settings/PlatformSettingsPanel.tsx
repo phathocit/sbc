@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import type { PlatformAdminBootstrapStatus, PlatformSettingsStatus, PlatformSettingsTestResult, PlatformSettingsTestSection } from '@sbc/contracts';
 import { api } from '@/lib/api';
 import { usePlatformTheme } from '../use-platform-theme';
+import PlatformTelegramSettings from './PlatformTelegramSettings';
 
 function randomKeyHex(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -115,7 +116,7 @@ export default function PlatformSettingsPanel({ embedded = false }: { embedded?:
       await api.bootstrapPlatformAdmin(bootstrapToken);
       setBootstrapToken('');
       await loadSettings();
-      setBootstrap({ available: false });
+      setBootstrap({ available: false, tokenConfigured: true, adminInitialized: true });
       setMessage('Đã khởi tạo quyền quản trị hệ thống cho tài khoản hiện tại.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Không khởi tạo được quyền quản trị.');
@@ -284,6 +285,7 @@ export default function PlatformSettingsPanel({ embedded = false }: { embedded?:
         {error && !unlockDialog && <p className="notice notice-error" role="alert">{error}</p>}
         {message && <p className="notice notice-success" role="status">{message}</p>}
         <div className="platform-settings-accordions">
+          <PlatformTelegramSettings unlocked={unlocked} currentPassword={currentPassword} />
           <details open={openSection === 'url'}>
             <summary onClick={(event) => { event.preventDefault(); toggleSection('url'); }}><span><strong>Địa chỉ ứng dụng công khai</strong><small>Đường dẫn dùng cho booking và điều hướng chủ tiệm</small></span><span className="platform-settings-summary-actions"><span className={`pa-config-status ${configTestTone('url')}`}>{configTestBadge('url', Boolean(settings.publicAppUrl))}</span></span></summary>
             <div className="pa-config-body"><p>Giá trị hiện tại: <code>{settings.publicAppUrl || 'Chưa có địa chỉ'}</code></p><div className="pa-config-actions"><button type="button" className="button button-secondary" disabled={!unlocked || !settings.publicAppUrl || busy} onClick={() => void runTest('url')}>Kiểm tra địa chỉ</button></div>{testResultView('url')}{editingSection === 'url' && <><label className="pa-config-field pa-config-field-medium">Origin web công khai<input className="field" type="url" inputMode="url" required placeholder="https://booking.example.com" value={publicAppUrl} onChange={(event) => setPublicAppUrl(event.target.value)} /><small>Chỉ nhập origin, không có đường dẫn, query hoặc fragment. Môi trường production cần HTTPS.</small></label><div className="pa-config-actions"><button type="button" className="button button-secondary" onClick={() => void cancelEditing()}>Hủy</button><button type="button" className="button button-primary" disabled={!unlocked || !settings.encryptionReady || busy} onClick={() => void saveSettings('url')}>{settings.publicAppUrl ? 'Cập nhật cấu hình' : 'Lưu cấu hình'}</button></div></>}</div>

@@ -9,9 +9,10 @@ import PlatformSettingsPanel from './settings/PlatformSettingsPanel';
 import PlatformPlansPanel from './PlatformPlansPanel';
 import PlatformBillingPanel from './PlatformBillingPanel';
 import PlatformSupportPanel from './PlatformSupportPanel';
+import PlatformOperationsPanel from './PlatformOperationsPanel';
 
 type AccessState = 'loading' | 'login' | 'admin' | 'bootstrap' | 'denied' | 'bootstrap-unavailable';
-type ConsoleTab = 'overview' | 'applications' | 'tenants' | 'notifications' | 'billing' | 'plans' | 'support' | 'settings';
+type ConsoleTab = 'overview' | 'applications' | 'tenants' | 'notifications' | 'billing' | 'plans' | 'support' | 'operations' | 'settings';
 type BillingView = 'subscriptions' | 'orders';
 type OverviewPeriodMode = 'day' | '7d' | '30d' | 'custom';
 type NotificationFilter = 'all' | PlatformNotificationDto['type'];
@@ -110,7 +111,7 @@ function PlatformTenantPlanPieChart({ data, error }: { data: PlatformBillingSumm
 
 function isConsoleTab(value: string | null): value is ConsoleTab {
   return value === 'overview' || value === 'applications' || value === 'tenants' || value === 'notifications'
-    || value === 'billing' || value === 'plans' || value === 'support' || value === 'settings';
+    || value === 'billing' || value === 'plans' || value === 'support' || value === 'operations' || value === 'settings';
 }
 
 function dateLabel(value: string): string {
@@ -184,6 +185,12 @@ export default function PlatformPage() {
   const [tenantPlanId, setTenantPlanId] = useState('');
   const [tenantPlanNote, setTenantPlanNote] = useState('');
   const [tenantPlanPassword, setTenantPlanPassword] = useState('');
+  const [invitationPassword, setInvitationPassword] = useState('');
+  const [statusTenant, setStatusTenant] = useState<PlatformTenantDto | null>(null);
+  const [statusReason, setStatusReason] = useState('');
+  const [statusPassword, setStatusPassword] = useState('');
+  const [supportTicketId, setSupportTicketId] = useState<string | null>(null);
+  const [billingOrderId, setBillingOrderId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const overviewDateRange = useMemo(() => {
     if (overviewPeriodMode === 'day') return { from: overviewSelectedDay, to: overviewSelectedDay };
@@ -405,12 +412,12 @@ export default function PlatformPage() {
   const changeTenantStatus = async (tenant: PlatformTenantDto) => {
     if (actionId) return;
     const nextStatus = tenant.status === 'active' ? 'suspended' : 'active';
-    if (!window.confirm(`${nextStatus === 'suspended' ? 'Tạm ngưng' : 'Kích hoạt lại'} tenant “${tenant.displayName}”?`)) return;
     setActionId(tenant.id); setError(null); setNotice(null);
     try {
-      const updated = await api.updatePlatformTenantStatus(tenant.id, { status: nextStatus });
-      setTenants((rows) => rows.map((row) => row.id === updated.id ? updated : row));
+      const updated = await api.updatePlatformTenantStatus(tenant.id, { status: nextStatus, reason: statusReason.trim(), currentPassword: statusPassword });
+      setTenants(await api.listPlatformTenants());
       setNotice(`${updated.displayName} hiện ${updated.status === 'active' ? 'đang hoạt động' : 'đã tạm ngưng'}.`);
+      setStatusTenant(null); setStatusReason(''); setStatusPassword('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không cập nhật được trạng thái tenant.');
     } finally { setActionId(null); }
@@ -419,7 +426,7 @@ export default function PlatformPage() {
   const openTenantDetail = async (tenantId: string) => {
     setDetailLoading(true);
     setTenantDetail(null);
-    try { const detail = await api.getPlatformTenantDetail(tenantId); setTenantDetail(detail); setTenantPlanId(''); setTenantPlanNote(''); setTenantPlanPassword(''); }
+    try { const detail = await api.getPlatformTenantDetail(tenantId); setTenantDetail(detail); setTenantPlanId(''); setTenantPlanNote(''); setTenantPlanPassword(''); setInvitationPassword(''); }
     catch (err) { setError(err instanceof Error ? err.message : 'Khong tai duoc chi tiet tenant.'); }
     finally { setDetailLoading(false); }
   };
@@ -442,6 +449,14 @@ export default function PlatformPage() {
     catch (err) { setError(err instanceof Error ? err.message : 'Không đăng xuất được. Hãy thử lại.'); setLoggingOut(false); }
   };
 
+  const openOperationsItem = (item: Awaited<ReturnType<typeof api.getPlatformOperations>>['work'][number]) => {
+    if (item.target === 'applications') { setTab('applications'); setApplicationFilter('all'); setQuery(''); setSelectedApplicationId(item.targetId); }
+    else if (item.target === 'support') { setSupportTicketId(item.targetId); setTab('support'); }
+    else if (item.target === 'billing') { setBillingOrderId(item.targetId); setTab('billing'); setBillingView('orders'); }
+    else if (item.target === 'tenants' && item.targetId) { setTab('tenants'); void openTenantDetail(item.targetId); }
+    else setTab('settings');
+  };
+
   return (
     <main className="app-page platform-page" data-theme={theme}>
       <div className="app-container platform-container">
@@ -456,6 +471,7 @@ export default function PlatformPage() {
             <button type="button" className={`platform-side-link ${tab === 'billing' ? 'is-active' : ''}`} aria-pressed={tab === 'billing'} onClick={() => setTab('billing')}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>Billing</span></button>
             <button type="button" className={`platform-side-link ${tab === 'plans' ? 'is-active' : ''}`} aria-pressed={tab === 'plans'} onClick={() => setTab('plans')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/></svg><span>Gói dịch vụ</span></button>
             <button type="button" className={`platform-side-link ${tab === 'notifications' ? 'is-active' : ''}`} aria-pressed={tab === 'notifications'} onClick={() => setTab('notifications')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span>Thông báo</span>{unreadNotificationCount > 0 && <i>{unreadNotificationCount}</i>}</button>
+            <button type="button" className={`platform-side-link ${tab === 'operations' ? 'is-active' : ''}`} aria-pressed={tab === 'operations'} onClick={() => setTab('operations')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM8 9h8M8 13h8M8 17h5"/></svg><span>Vận hành & nhật ký</span></button>
             <button type="button" className={`platform-side-link ${tab === 'settings' ? 'is-active' : ''}`} aria-pressed={tab === 'settings'} onClick={() => { setTab('settings'); setQuery(''); }}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.7-1l-1.7.6-1.4-2.4 1.4-1.1a7 7 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.6a8 8 0 0 1 1.7-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.6 1.4 2.4-1.4 1.1a7 7 0 0 1 0 1.9Z"/></svg><span>Cấu hình</span></button>
           </nav>
           <div className="platform-sidebar-footer">
@@ -482,9 +498,10 @@ export default function PlatformPage() {
               <button type="button" className="platform-refresh-button is-icon-only" aria-label="Làm mới dữ liệu" title="Làm mới" disabled={dataLoading} onClick={() => void loadManagementData()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 9a7 7 0 0 1 11.8-2L20 12M4 12l2.7 5a7 7 0 0 0 11.8-2"/></svg></button>
             </div>}
 
-            {tab === 'support' && <PlatformSupportPanel />}
+            {tab === 'support' && <PlatformSupportPanel initialTicketId={supportTicketId} />}
+            {tab === 'operations' && <PlatformOperationsPanel onOpen={openOperationsItem} />}
             {tab === 'settings' && <PlatformSettingsPanel embedded />}
-            {tab === 'billing' && <PlatformBillingPanel key={billingView} plans={plans} view={billingView} onViewChange={setBillingView} onOpenTenant={(tenantId) => void openTenantDetail(tenantId)} />}
+            {tab === 'billing' && <PlatformBillingPanel key={billingView} plans={plans} view={billingView} onViewChange={setBillingView} onOpenTenant={(tenantId) => void openTenantDetail(tenantId)} initialOrderId={billingOrderId} />}
             {tab === 'plans' && <PlatformPlansPanel plans={plans} onChanged={() => void loadManagementData(true)} />}
             {!dataLoading && tab === 'notifications' && <>
               <div className="platform-notification-filters">
@@ -493,6 +510,12 @@ export default function PlatformPage() {
                   { key: 'all', label: 'Tất cả', count: notifications.length },
                   { key: 'tenant_application_submitted', label: 'Hồ sơ mới', count: notifications.filter((notification) => notification.type === 'tenant_application_submitted').length },
                   { key: 'tenant_application_reviewed', label: 'Kết quả duyệt', count: notifications.filter((notification) => notification.type === 'tenant_application_reviewed').length },
+                  { key: 'tenant_status_changed', label: 'Trạng thái tenant', count: notifications.filter((notification) => notification.type === 'tenant_status_changed').length },
+                  { key: 'support_ticket_created', label: 'Hỗ trợ mới', count: notifications.filter((notification) => notification.type === 'support_ticket_created').length },
+                  { key: 'support_ticket_replied', label: 'Phản hồi hỗ trợ', count: notifications.filter((notification) => notification.type === 'support_ticket_replied').length },
+                  { key: 'billing_review_required', label: 'Cần đối soát', count: notifications.filter((notification) => notification.type === 'billing_review_required').length },
+                  { key: 'billing_payment_paid', label: 'Đã thu', count: notifications.filter((notification) => notification.type === 'billing_payment_paid').length },
+                  { key: 'billing_payment_failed', label: 'Thanh toán lỗi', count: notifications.filter((notification) => notification.type === 'billing_payment_failed').length },
                 ] as const).map((filter) => <button type="button" key={filter.key} className={`platform-notification-filter${notificationFilter === filter.key ? ' is-active' : ''}`} aria-pressed={notificationFilter === filter.key} onClick={() => setNotificationFilter(filter.key)}>{filter.label}<span>{filter.count}</span></button>)}
                 </div>
                 <div className="platform-notification-read-filters" role="group" aria-label="Lọc trạng thái đã đọc">
@@ -510,6 +533,9 @@ export default function PlatformPage() {
                 <div><div className="platform-notification-title"><strong>{notification.title}</strong><span className={`platform-notification-read-state ${notification.isRead ? 'is-read' : 'is-unread'}`}>{notification.isRead ? 'Đã đọc' : 'Chưa đọc'}</span></div><p>{notification.description}</p><time dateTime={notification.occurredAt}>{dateLabel(notification.occurredAt)}</time></div>
                 <div className="platform-notification-actions">
                   {notification.applicationId && <button type="button" className="platform-overview-link" onClick={() => { void markNotificationRead(notification); const application = applications.find((item) => item.id === notification.applicationId); setTab('applications'); setApplicationFilter('all'); setQuery(application?.name ?? ''); setSelectedApplicationId(application?.id ?? null); }}>Mở hồ sơ <span aria-hidden="true">›</span></button>}
+                  {notification.ticketId && <button type="button" className="platform-overview-link" onClick={() => { void markNotificationRead(notification); setSupportTicketId(notification.ticketId ?? null); setTab('support'); }}>Mở hỗ trợ <span aria-hidden="true">›</span></button>}
+                  {notification.orderId && <button type="button" className="platform-overview-link" onClick={() => { void markNotificationRead(notification); setBillingOrderId(notification.orderId ?? null); setTab('billing'); setBillingView('orders'); }}>Mở đơn <span aria-hidden="true">›</span></button>}
+                  {notification.type === 'tenant_status_changed' && notification.tenantId && <button type="button" className="platform-overview-link" onClick={() => { void markNotificationRead(notification); setTab('tenants'); void openTenantDetail(notification.tenantId!); }}>Mở tenant <span aria-hidden="true">›</span></button>}
                   {!notification.isRead && <button type="button" className="platform-notification-mark-read" onClick={() => void markNotificationRead(notification)}>Đánh dấu đã đọc</button>}
                 </div>
               </article>)}
@@ -519,6 +545,7 @@ export default function PlatformPage() {
             </>}
             {tab !== 'settings' && dataLoading && <div className="platform-empty-state" role="status">Đang tải dữ liệu quản trị…</div>}
             {!dataLoading && tab === 'overview' && <div className="platform-overview-dashboard">
+              <PlatformOperationsPanel compact onOpen={openOperationsItem} onOpenOperations={() => setTab('operations')} />
               <div className="platform-overview-period-toolbar">
                 <div className="platform-overview-period-heading"><strong>Kỳ dữ liệu</strong><span>{overviewDateRange.from && overviewDateRange.to ? `${dateOnlyLabel(overviewDateRange.from)} – ${dateOnlyLabel(overviewDateRange.to)}` : 'Chọn khoảng thời gian'}</span></div>
                 <div className="platform-overview-period-controls">
@@ -568,15 +595,15 @@ export default function PlatformPage() {
                   </div>
                 </section>
                 <section className="platform-overview-panel" aria-labelledby="overview-reconciliation-title">
-                  <header><div><h2 id="overview-reconciliation-title">Thanh toán cần đối soát</h2><small>{Math.min(reconciliationOrders.length, 4)} đơn VNPAY mới nhất · mọi thời điểm</small></div><button type="button" className="platform-overview-link" onClick={() => { setTab('billing'); setBillingView('orders'); }}>Mở Billing <span aria-hidden="true">›</span></button></header>
+                  <header><div><h2 id="overview-reconciliation-title">Thanh toán cần đối soát</h2><small>{Math.min(reconciliationOrders.length, 4)} đơn mới nhất · mọi thời điểm</small></div><button type="button" className="platform-overview-link" onClick={() => { setTab('billing'); setBillingView('orders'); }}>Mở Billing <span aria-hidden="true">›</span></button></header>
                   {reconciliationActionError && <p className="platform-overview-action-message is-error" role="alert">{reconciliationActionError}</p>}
                   {reconciliationActionNotice && <p className="platform-overview-action-message" role="status">{reconciliationActionNotice}</p>}
                   <div className="platform-overview-panel-list">
                     {reconciliationOrders.slice(0, 4).map((order) => <article className="platform-overview-row" key={order.id}>
-                      <div className="platform-overview-row-main"><strong>{order.tenantName}</strong><span>{order.amountVnd.toLocaleString('vi-VN')} đ · VNPAY</span><small>{dateLabel(order.createdAt)} · {orderStatusLabel(order)}</small></div>
+                      <div className="platform-overview-row-main"><strong>{order.tenantName}</strong><span>{order.amountVnd.toLocaleString('vi-VN')} đ · {order.provider.toUpperCase()}</span><small>{dateLabel(order.createdAt)} · {orderStatusLabel(order)}</small></div>
                       <button type="button" className="button button-secondary platform-overview-reconcile" disabled={Boolean(reconcilingOrderId)} onClick={() => void reconcileDashboardPayment(order.id)}>{reconcilingOrderId === order.id ? 'Đang đối soát…' : 'Đối soát'}</button>
                     </article>)}
-                    {!overviewFinanceLoading && !billingSummaryError && reconciliationOrders.length === 0 && <div className="platform-overview-empty">Không có đơn VNPAY cần đối soát.</div>}
+                    {!overviewFinanceLoading && !billingSummaryError && reconciliationOrders.length === 0 && <div className="platform-overview-empty">Không có đơn cần đối soát.</div>}
                   </div>
                 </section>
               </div>
@@ -589,14 +616,15 @@ export default function PlatformPage() {
               {filteredApplications.length === 0 && <div className="platform-empty-state"><strong>{applications.length ? 'Không có hồ sơ phù hợp' : 'Chưa có đăng ký tenant'}</strong><p>{applications.length ? 'Thử thay đổi bộ lọc hoặc từ khóa tìm kiếm.' : 'Hồ sơ mới sẽ xuất hiện ở đây sau khi chủ tiệm gửi đăng ký.'}</p></div>}
             </div>}
 
-            {!dataLoading && tab === 'tenants' && <div className="platform-tenant-table-wrap"><table className="platform-tenant-table"><thead><tr><th>Tenant</th><th>Owner</th><th>Ngày tạo</th><th>Trạng thái</th><th><span className="sr-only">Thao tác</span></th></tr></thead><tbody>
-              {filteredTenants.map((tenant) => <tr key={tenant.id}><td><button type="button" className="platform-tenant-detail-link" onClick={() => void openTenantDetail(tenant.id)}>{tenant.displayName}</button><small>/{tenant.slug}</small></td><td>{tenant.ownerName || 'Chưa có owner'}<small>{tenant.ownerEmail || '-'}</small></td><td>{dateLabel(tenant.createdAt)}</td><td><span className={`platform-status is-${tenant.status}`}>{tenant.status === 'active' ? 'Hoạt động' : 'Tạm ngưng'}</span></td><td><button type="button" className={`button ${tenant.status === 'active' ? 'button-danger-soft' : 'button-primary'}`} disabled={actionId !== null} onClick={() => void changeTenantStatus(tenant)}>{tenant.status === 'active' ? 'Tạm ngưng' : 'Kích hoạt'}</button></td></tr>)}
-              {filteredTenants.length === 0 && <tr><td colSpan={5}><div className="platform-empty-state"><strong>{tenants.length ? 'Không tìm thấy tenant' : 'Chưa có tenant'}</strong><p>{tenants.length ? 'Thử thay đổi bộ lọc hoặc từ khóa.' : 'Tenant sẽ được tạo sau khi hồ sơ đăng ký được duyệt.'}</p></div></td></tr>}
+            {!dataLoading && tab === 'tenants' && <div className="platform-tenant-table-wrap"><table className="platform-tenant-table"><thead><tr><th>Tenant</th><th>Owner</th><th>Gói và sử dụng</th><th>Ngày tạo</th><th>Trạng thái</th><th><span className="sr-only">Thao tác</span></th></tr></thead><tbody>
+              {filteredTenants.map((tenant) => <tr key={tenant.id}><td><button type="button" className="platform-tenant-detail-link" onClick={() => void openTenantDetail(tenant.id)}>{tenant.displayName}</button><small>/{tenant.slug}</small></td><td>{tenant.ownerName || 'Chưa có owner'}<small>{tenant.ownerEmail || '-'}</small></td><td>{tenant.currentPlanName ?? 'Chưa có gói'}<small>{tenant.bookingUsage ?? 0}/{tenant.bookingLimit ?? '∞'} lịch · {tenant.planPeriodEnd ? `đến ${dateLabel(tenant.planPeriodEnd)}` : 'chưa có kỳ'}</small></td><td>{dateLabel(tenant.createdAt)}</td><td><span className={`platform-status is-${tenant.status}`}>{tenant.status === 'active' ? 'Hoạt động' : 'Tạm ngưng'}</span></td><td><button type="button" className={`button ${tenant.status === 'active' ? 'button-danger-soft' : 'button-primary'}`} disabled={actionId !== null} onClick={() => { setStatusTenant(tenant); setStatusReason(''); setStatusPassword(''); }}>{tenant.status === 'active' ? 'Tạm ngưng' : 'Kích hoạt'}</button></td></tr>)}
+              {filteredTenants.length === 0 && <tr><td colSpan={6}><div className="platform-empty-state"><strong>{tenants.length ? 'Không tìm thấy tenant' : 'Chưa có tenant'}</strong><p>{tenants.length ? 'Thử thay đổi bộ lọc hoặc từ khóa.' : 'Tenant sẽ được tạo sau khi hồ sơ đăng ký được duyệt.'}</p></div></td></tr>}
             </tbody></table></div>}
           </section>
         </>}
         </div>
       </div>
+      {statusTenant && <div className="platform-detail-backdrop" role="presentation"><section className="platform-application-detail" role="dialog" aria-modal="true" aria-labelledby="tenant-status-title"><header><div><small>QUẢN LÝ TENANT</small><h2 id="tenant-status-title">{statusTenant.status === 'active' ? 'Tạm ngưng' : 'Kích hoạt lại'} {statusTenant.displayName}</h2></div><button type="button" aria-label="Đóng" onClick={() => setStatusTenant(null)}>×</button></header><div className="stack-md"><p>Thay đổi này ảnh hưởng đến quyền sử dụng workspace và trang đặt lịch. Lý do và tài khoản admin sẽ được lưu vào lịch sử.</p><label className="field-group">Lý do (10–500 ký tự)<textarea className="field" minLength={10} maxLength={500} value={statusReason} onChange={(event) => setStatusReason(event.target.value)} /></label><label className="field-group">Mật khẩu admin<input className="field" type="password" autoComplete="current-password" value={statusPassword} onChange={(event) => setStatusPassword(event.target.value)} /></label><div className="action-row"><button type="button" className="button button-secondary" onClick={() => setStatusTenant(null)}>Đóng</button><button type="button" className="button button-primary" disabled={Boolean(actionId) || statusReason.trim().length < 10 || !statusPassword} onClick={() => void changeTenantStatus(statusTenant)}>Xác nhận thay đổi</button></div></div></section></div>}
       {selectedApplication && <div className="platform-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedApplicationId(null); }}>
         <section className="platform-application-detail" role="dialog" aria-modal="true" aria-labelledby="application-detail-title">
           <header><div><small>HỒ SƠ ĐĂNG KÝ</small><h2 id="application-detail-title">{selectedApplication.name}</h2></div><button type="button" aria-label="Đóng chi tiết hồ sơ" onClick={() => setSelectedApplicationId(null)}>×</button></header>
@@ -609,7 +637,7 @@ export default function PlatformPage() {
             <div><dt>Trạng thái tài khoản</dt><dd>{selectedApplication.applicantUserId ? 'Đã liên kết tài khoản' : 'Chưa liên kết tài khoản'}</dd></div><div><dt>Mã hồ sơ</dt><dd>{selectedApplication.id}</dd></div>
           </dl>
           {selectedApplication.reviewNote && <p className="platform-application-review-note"><strong>Ghi chú xét duyệt</strong>{selectedApplication.reviewNote}</p>}
-          {selectedApplication.status === 'pending' && <div className="platform-application-review"><label className="platform-review-input">Ghi chú cho người đăng ký<textarea value={reviewNotes[selectedApplication.id] ?? ''} maxLength={1000} onChange={(event) => setReviewNotes((notes) => ({ ...notes, [selectedApplication.id]: event.target.value }))} placeholder="Lý do từ chối hoặc lưu ý khi duyệt (không bắt buộc)" /></label><div className="platform-review-buttons"><button className="button button-primary" type="button" disabled={actionId !== null} onClick={() => void reviewApplication(selectedApplication, 'approve')}>{actionId === selectedApplication.id ? 'Đang xử lý…' : 'Duyệt hồ sơ'}</button><button className="button button-danger-soft" type="button" disabled={actionId !== null} onClick={() => void reviewApplication(selectedApplication, 'reject')}>Từ chối</button></div></div>}
+          {selectedApplication.status === 'pending' && <div className="platform-application-review"><label className="platform-review-input">Ghi chú xét duyệt<textarea value={reviewNotes[selectedApplication.id] ?? ''} maxLength={1000} onChange={(event) => setReviewNotes((notes) => ({ ...notes, [selectedApplication.id]: event.target.value }))} placeholder="Cần ghi rõ lý do nếu từ chối; lý do sẽ gửi cho người đăng ký qua email" /></label><div className="platform-review-buttons"><button className="button button-primary" type="button" disabled={actionId !== null} onClick={() => void reviewApplication(selectedApplication, 'approve')}>{actionId === selectedApplication.id ? 'Đang xử lý…' : 'Duyệt hồ sơ'}</button><button className="button button-danger-soft" type="button" disabled={actionId !== null || (reviewNotes[selectedApplication.id] ?? '').trim().length < 10} onClick={() => void reviewApplication(selectedApplication, 'reject')}>Từ chối</button></div></div>}
         </section>
       </div>}
       {(tenantDetail || detailLoading) && <div className="platform-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setTenantDetail(null); }}>
@@ -622,11 +650,13 @@ export default function PlatformPage() {
               <div><dt>Ngày tạo</dt><dd>{dateLabel(tenantDetail.createdAt)}</dd></div><div><dt>Cập nhật gần nhất</dt><dd>{dateLabel(tenantDetail.updatedAt)}</dd></div>
             </dl>
             <div className="platform-detail-metrics"><div><strong>{tenantDetail.staffProfileCount}</strong><span>Hồ sơ nhân viên</span></div><div><strong>{tenantDetail.serviceCount}</strong><span>Dịch vụ</span></div><div><strong>{tenantDetail.bookingCount}</strong><span>Lịch đặt</span></div></div>
+            {tenantDetail.onboarding && <section className="platform-tenant-billing"><h3>Hồ sơ và kích hoạt</h3><p>Đăng ký: {tenantDetail.onboarding.requestedPlanName} · Gói trả phí chỉ được cấp sau khi thanh toán được xác nhận.</p><p>Người đăng ký: {tenantDetail.onboarding.applicantEmail} · Duyệt bởi {tenantDetail.onboarding.reviewerName ?? '—'} {tenantDetail.onboarding.reviewedAt ? `lúc ${dateLabel(tenantDetail.onboarding.reviewedAt)}` : ''}</p><p>Tài khoản: {tenantDetail.onboarding.ownerAccountStatus === 'active' ? 'Đã kích hoạt' : 'Chưa kích hoạt'} · Lời mời: {({ pending: 'Đang chờ chủ tiệm', used: 'Đã sử dụng', expired: 'Hết hạn', revoked: 'Đã thu hồi', not_required: 'Không cần lời mời', missing: 'Chưa có' } as const)[tenantDetail.onboarding.invitationStatus]}</p><p>Email lời mời: {tenantDetail.onboarding.invitationDeliveryStatus === 'sent' ? 'Đã gửi' : tenantDetail.onboarding.invitationDeliveryStatus === 'failed' ? `Gửi thất bại · ${tenantDetail.onboarding.invitationDeliveryError ?? 'kiểm tra worker'}` : tenantDetail.onboarding.invitationDeliveryStatus === 'queued' ? 'Đang chờ worker gửi' : 'Chưa có'}</p>{tenantDetail.onboarding.ownerAccountStatus !== 'active' && <div className="platform-plan-assign"><label>Mật khẩu quản trị<input type="password" autoComplete="current-password" value={invitationPassword} onChange={(event) => setInvitationPassword(event.target.value)} /></label><button type="button" className="button button-secondary" disabled={actionId !== null || !invitationPassword || tenantDetail.onboarding.invitationDeliveryStatus === 'queued'} onClick={async () => { if (!tenantDetail) return; setActionId(tenantDetail.id); setError(null); try { await api.resendPlatformOwnerInvitation(tenantDetail.id, invitationPassword); setTenantDetail(await api.getPlatformTenantDetail(tenantDetail.id)); setInvitationPassword(''); setNotice('Đã xếp email lời mời mới. Kiểm tra trạng thái gửi trong chi tiết tenant.'); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Không gửi lại được lời mời.'); } finally { setActionId(null); } }}>Gửi lại lời mời</button></div>}</section>}
             <section className="platform-tenant-billing"><header><div><h3>Gói dịch vụ</h3><p>{tenantDetail.billing ? `${tenantDetail.billing.usage.activeStaff}/${tenantDetail.billing.plan.activeStaffLimit} nhân viên · ${tenantDetail.billing.usage.bookings}/${tenantDetail.billing.usage.bookingLimit ?? '∞'} lịch trong kỳ` : 'Tenant chưa có gói được gán.'}</p></div></header>
               {tenantDetail.billing && <p className="platform-plan-current">{tenantDetail.billing.plan.displayName} · {tenantDetail.billing.plan.priceVnd.toLocaleString('vi-VN')} đ/tháng · đến {dateLabel(tenantDetail.billing.periodEnd)}</p>}
               <div className="platform-plan-assign"><label>Gán gói hỗ trợ<select value={tenantPlanId} onChange={(event) => setTenantPlanId(event.target.value)}><option value="">Chọn gói đang hoạt động</option>{plans.filter((plan) => plan.isActive).map((plan) => <option key={plan.id} value={plan.id}>{plan.displayName} · {plan.priceVnd.toLocaleString('vi-VN')} đ</option>)}</select></label><label>Ghi chú bắt buộc<input value={tenantPlanNote} maxLength={1000} onChange={(event) => setTenantPlanNote(event.target.value)} placeholder="Lý do hỗ trợ" /></label><label>Mật khẩu quản trị<input type="password" autoComplete="current-password" value={tenantPlanPassword} onChange={(event) => setTenantPlanPassword(event.target.value)} /></label><button type="button" className="button button-primary" disabled={actionId !== null || !tenantPlanId || tenantPlanNote.trim().length < 3 || !tenantPlanPassword} onClick={() => void assignPlan()}>{actionId === tenantDetail.id ? 'Đang lưu…' : 'Gán gói hỗ trợ'}</button></div>
-              {tenantDetail.planChanges.length > 0 && <ul className="platform-plan-history">{tenantDetail.planChanges.map((change, index) => <li key={`${change.changedAt}-${index}`}><span>{change.fromPlan ?? 'Chưa gán'} → {change.toPlan}</span><small>{change.note} · {dateLabel(change.changedAt)}</small></li>)}</ul>}
+              {tenantDetail.planChanges.length > 0 && <ul className="platform-plan-history">{tenantDetail.planChanges.map((change, index) => <li key={`${change.changedAt}-${index}`}><span>{change.fromPlan ?? 'Chưa gán'} → {change.toPlan}</span><small>{change.note} · {change.changeType === 'support_grant' ? 'Gói hỗ trợ' : change.changeType ?? 'Thanh toán'} · {change.actorName ?? 'Hệ thống'} · {dateLabel(change.changedAt)}</small></li>)}</ul>}
             </section>
+            {Boolean(tenantDetail.statusChanges?.length) && <section className="platform-tenant-billing"><h3>Lịch sử trạng thái</h3><ul className="platform-plan-history">{tenantDetail.statusChanges?.map((change) => <li key={change.changedAt}><span>{change.from === 'active' ? 'Hoạt động' : 'Tạm ngưng'} → {change.to === 'active' ? 'Hoạt động' : 'Tạm ngưng'}</span><small>{change.reason} · {change.actorName} · {dateLabel(change.changedAt)}</small></li>)}</ul></section>}
             <div className="platform-detail-lists">
               <section><h3>Nhân viên</h3>{tenantDetail.staffProfiles.length ? <ul>{tenantDetail.staffProfiles.map((person, index) => <li key={`${person.name}-${index}`}><span>{person.name}</span><small>{person.active ? 'Đang hoạt động' : 'Đã tạm ngưng'}</small></li>)}</ul> : <p>Chưa có hồ sơ nhân viên.</p>}</section>
               <section><h3>Dịch vụ</h3>{tenantDetail.services.length ? <ul>{tenantDetail.services.map((service, index) => <li key={`${service.name}-${index}`}><span>{service.name} · {service.durationMinutes} phút · {(service.priceMinor / 100).toLocaleString('vi-VN')} {service.currency}</span><small>{service.active ? 'Đang hoạt động' : 'Đã tạm ngưng'}</small></li>)}</ul> : <p>Chưa có dịch vụ.</p>}</section>

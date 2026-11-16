@@ -14,7 +14,9 @@ export class SchedulingController {
 
   @Get('business-hours')
   listBusinessHours(@CurrentTenant() context: RequestTenantContext): Promise<WorkingHourDto[]> {
-    return this.catalog.listBusinessHours(context.tenant.id, context.location.id);
+    const locationId = context.location?.id;
+    if (!locationId) throw new BadRequestException('An active tenant location is required');
+    return this.catalog.listBusinessHours(context.tenant.id, locationId);
   }
 
   @Put('business-hours/week')
@@ -30,7 +32,9 @@ export class SchedulingController {
   @UseGuards(RolesGuard)
   @Roles('owner', 'admin', 'receptionist')
   setBusinessHours(@CurrentTenant() context: RequestTenantContext, @Param('weekday', ParseIntPipe) weekday: number, @Body() dto: Omit<WorkingHoursRequest, 'weekday'>): Promise<WorkingHourDto[]> {
-    return this.catalog.setBusinessHours(context.tenant.id, context.location.id, { ...dto, weekday });
+    const locationId = context.location?.id;
+    if (!locationId) throw new BadRequestException('An active tenant location is required');
+    return this.catalog.setBusinessHours(context.tenant.id, locationId, { ...dto, weekday });
   }
 
   @Get('staff/:staffId/hours')
@@ -73,7 +77,9 @@ export class SchedulingController {
   @UseGuards(RolesGuard)
   @Roles('owner', 'admin', 'receptionist')
   createException(@CurrentTenant() context: RequestTenantContext, @Body() dto: CreateScheduleExceptionRequest): Promise<ScheduleExceptionDto> {
-    return this.catalog.createException(context.tenant.id, context.location.id, dto);
+    const locationId = context.location?.id;
+    if (!locationId) throw new BadRequestException('An active tenant location is required');
+    return this.catalog.createException(context.tenant.id, locationId, dto);
   }
 
   @Patch('exceptions/:exceptionId/deactivate')

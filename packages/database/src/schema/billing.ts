@@ -29,6 +29,8 @@ export const planCatalog = pgTable("plan_catalog", {
   currency: varchar("currency", { length: 3 }).notNull().default("VND"),
   activeStaffLimit: integer("active_staff_limit").notNull(),
   monthlyBookingLimit: integer("monthly_booking_limit"),
+  appointmentRemindersEnabled: boolean("appointment_reminders_enabled").notNull().default(false),
+  monthlyBookingReportsEnabled: boolean("monthly_booking_reports_enabled").notNull().default(false),
   isActive: boolean("is_active").notNull().default(true),
   sortOrder: integer("sort_order").notNull().default(0),
   features: jsonb("features").$type<string[]>().notNull().default(sql`'[]'::jsonb`),

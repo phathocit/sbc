@@ -55,6 +55,11 @@ import type {
   PlatformTenantDto,
   PlatformTenantDetailDto,
   PlatformNotificationDto,
+  PlatformTelegramIntegrationDto,
+  PlatformTelegramChatDiscoveryDto,
+  PlatformTelegramPairingCodeDto,
+  SavePlatformTelegramIntegrationRequest,
+  TestPlatformTelegramIntegrationRequest,
   TenantNotificationPageDto,
   TenantApplicationDto,
   ReviewTenantApplicationRequest,
@@ -86,6 +91,7 @@ import type {
   TelegramGroupDiscoveryDto,
   ConfirmTelegramGroupRequest,
   TelegramIntegrationTestDto,
+  TenantTelegramDeliveryDto,
   SaveTenantTelegramIntegrationRequest,
   CreateSupportMessageRequest,
   CreateSupportTicketRequest,
@@ -126,13 +132,11 @@ async function refreshSession(): Promise<boolean> {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'x-sbc-request': '1', 'x-sbc-user-active': userWasRecentlyActive() ? '1' : '0' },
       }).then((response) => response.ok).catch(() => false);
-    const locks = typeof navigator !== 'undefined'
-      ? (navigator as Navigator & { locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> } }).locks
-      : undefined;
-    const coordinated = locks ? locks.request('sbc-auth-refresh', performRefresh) : performRefresh();
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    const coordinated: Promise<boolean> = locks ? locks.request('sbc-auth-refresh', performRefresh).then((value) => value) : performRefresh();
     refreshInFlight = coordinated.finally(() => { refreshInFlight = null; });
   }
-  return refreshInFlight;
+  return refreshInFlight ?? false;
 }
 
 async function request<T>(
@@ -269,6 +273,15 @@ function billingQuery(filters: PlatformBillingFilters): string {
 }
 
 export const api = {
+  getPlatformOperations: () => request<{
+    work: Array<{ kind: string; id: string; tenantId: string | null; title: string; detail: string; occurredAt: string; target: 'applications' | 'support' | 'billing' | 'tenants' | 'settings'; targetId: string | null }>;
+    health: { webhook: { failed: number; stale: number }; email: { retrying: number; failed: number; oldestPendingMinutes: number | null }; telegram: { retrying: number; failed: number; oldestPendingMinutes: number | null; connection: string } };
+    checkedAt: string;
+  }>('/v1/platform/operations/overview'),
+  getPlatformAudit: (page = 1, entityType = '') => request<{ page: number; items: Array<{
+    id: string; actorUserId: string; actorName: string; tenantId: string | null; entityType: string; entityId: string;
+    action: string; before: Record<string, unknown> | null; after: Record<string, unknown> | null; reason: string | null; occurredAt: string;
+  }> }>(`/v1/platform/operations/audit?page=${page}${entityType ? `&entityType=${encodeURIComponent(entityType)}` : ''}`),
   // Auth
   register: (dto: RegisterRequest) =>
     request<AuthResponse>('/v1/auth/register', { method: 'POST', body: dto }),
@@ -296,6 +309,11 @@ export const api = {
     request<PlatformSettingsStatus>('/v1/platform-settings', { method: 'PUT', body: dto }),
   testPlatformSettings: (dto: TestPlatformSettingsRequest) =>
     request<PlatformSettingsTestResult>('/v1/platform-settings/test', { method: 'POST', body: dto }),
+  getPlatformTelegram: () => request<PlatformTelegramIntegrationDto>('/v1/platform/telegram'),
+  savePlatformTelegram: (body: SavePlatformTelegramIntegrationRequest) => request<PlatformTelegramIntegrationDto>('/v1/platform/telegram', { method: 'PUT', body }),
+  discoverPlatformTelegramChats: (body: TestPlatformTelegramIntegrationRequest) => request<PlatformTelegramChatDiscoveryDto>('/v1/platform/telegram/discover', { method: 'POST', body }),
+  createPlatformTelegramPairingCode: (body: TestPlatformTelegramIntegrationRequest) => request<PlatformTelegramPairingCodeDto>('/v1/platform/telegram/pairing-code', { method: 'POST', body }),
+  testPlatformTelegram: (body: TestPlatformTelegramIntegrationRequest) => request<PlatformTelegramIntegrationDto>('/v1/platform/telegram/test', { method: 'POST', body }),
 
   // Tenant billing uses server-side prices and requires an owner membership for checkout.
   listPlans: (tenantId: string) => request<PlanDto[]>('/v1/billing/plans', { tenantId }),
@@ -367,6 +385,8 @@ export const api = {
     request<{ read: true }>('/v1/notifications/read-all', { method: 'PATCH', tenantId }),
   getTenantTelegramIntegration: (tenantId: string) =>
     request<TenantTelegramIntegrationStatus>('/v1/integrations/telegram', { tenantId }),
+  listTenantTelegramDeliveries: (tenantId: string) => request<TenantTelegramDeliveryDto[]>('/v1/integrations/telegram/deliveries', { tenantId }),
+  retryTenantTelegramDelivery: (tenantId: string, deliveryId: string) => request<{ queued: true }>(`/v1/integrations/telegram/deliveries/${deliveryId}/retry`, { method: 'POST', tenantId }),
   saveTenantTelegramIntegration: (tenantId: string, body: SaveTenantTelegramIntegrationRequest) =>
     request<TenantTelegramIntegrationStatus>('/v1/integrations/telegram', { method: 'PUT', tenantId, body }),
   createTenantTelegramLinkCode: (tenantId: string) =>
@@ -381,6 +401,8 @@ export const api = {
     request<TenantTelegramIntegrationStatus>('/v1/integrations/telegram/enabled', { method: 'PATCH', tenantId, body: { enabled } }),
   updatePlatformTenantStatus: (tenantId: string, dto: UpdateTenantStatusRequest) =>
     request<PlatformTenantDto>(`/v1/platform/tenants/${tenantId}/status`, { method: 'PATCH', body: dto }),
+  resendPlatformOwnerInvitation: (tenantId: string, currentPassword: string) =>
+    request<{ queued: true }>(`/v1/platform/tenants/${tenantId}/invitation/resend`, { method: 'POST', body: { currentPassword } }),
   listTenantApplications: () => request<TenantApplicationDto[]>('/v1/platform/tenant-applications'),
   reviewTenantApplication: (applicationId: string, dto: ReviewTenantApplicationRequest) =>
     request<TenantApplicationDto>(`/v1/platform/tenant-applications/${applicationId}/review`, { method: 'PATCH', body: dto }),

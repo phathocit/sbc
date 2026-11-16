@@ -9,9 +9,9 @@ This repository is a portfolio project and local development setup. It is not a 
 - **Tenant workspace:** manage services, staff expertise, opening hours, shifts, booking policies and exceptions.
 - **Public booking:** customers can choose up to three services, see a combined schedule suggestion and book without creating an account.
 - **Booking integrity:** server-side availability checks, atomic staff allocation, conflict protection, idempotent booking requests and tenant-scoped guest management links.
-- **Platform administration:** review tenant applications; manage tenants, plans, billing, system settings and support requests.
+- **Platform administration:** review tenant applications; audit tenant status and plan history; track activation invitations, quotas, billing reconciliation, system settings and support requests.
 - **Plans and payments:** enforce plan limits and process one-time monthly payments through VNPAY and MoMo provider notifications. Payment credentials are configured outside source control; use sandbox credentials for local development.
-- **Notifications:** workspace notifications, appointment reminders and optional Telegram group integration. An outbox worker delivers email and retries transient failures.
+- **Notifications:** workspace and Platform alerts, appointment reminders, optional tenant Telegram groups, and a private Platform Admin bot that can receive alerts and reply to support tickets. An outbox worker delivers email and retries transient failures.
 - **Workspace insights:** booking trends, service mix and estimated revenue charts, plus configurable workspace themes.
 
 ## Architecture
@@ -28,7 +28,7 @@ flowchart LR
   Worker --> SMTP[SMTP provider]
   VNPAY[VNPAY] --> API
   MoMo[MoMo] --> API
-  API --> Telegram[Telegram Bot API]
+  Worker --> Telegram[Telegram Bot API]
 ```
 
 The API owns authentication, tenant authorization, booking rules, billing state and provider webhook verification. PostgreSQL stores tenant-scoped records and transactional outbox work. The worker processes email outbox events separately from web requests.

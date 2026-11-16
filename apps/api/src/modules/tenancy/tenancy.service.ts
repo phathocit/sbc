@@ -397,6 +397,14 @@ export class TenancyService {
       if (dto.appointmentReminderMinutes !== null && (!Number.isInteger(dto.appointmentReminderMinutes) || dto.appointmentReminderMinutes < 1 || dto.appointmentReminderMinutes > 1440)) {
         throw new BadRequestException('Appointment reminder must be disabled or between 1 and 1440 minutes');
       }
+      if (dto.appointmentReminderMinutes !== null) {
+        const [entitlement] = await db.select({ enabled: planCatalog.appointmentRemindersEnabled, periodEnd: tenantSubscriptions.currentPeriodEnd, status: tenantSubscriptions.status })
+          .from(tenantSubscriptions).innerJoin(planCatalog, eq(tenantSubscriptions.planId, planCatalog.id))
+          .where(eq(tenantSubscriptions.tenantId, tenantId)).limit(1);
+        if (!entitlement || !entitlement.enabled || entitlement.status !== 'active' || entitlement.periodEnd <= new Date()) {
+          throw new ConflictException({ errorCode: 'PLAN_FEATURE_UNAVAILABLE', message: 'Appointment reminders require an active paid plan' });
+        }
+      }
       updateValues.appointmentReminderMinutes = dto.appointmentReminderMinutes;
     }
 

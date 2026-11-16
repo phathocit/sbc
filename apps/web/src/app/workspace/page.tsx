@@ -26,6 +26,22 @@ function GreetingIcon({ period }: { period: string }) {
   </svg></span>;
 }
 
+const quickLinks = [
+  { href: '/workspace/calendar', label: 'Lịch hẹn', detail: 'Xem và xử lý lịch', icon: 'calendar' },
+  { href: '/workspace/catalog?section=services', label: 'Dịch vụ', detail: 'Cập nhật dịch vụ tiệm', icon: 'service' },
+  { href: '/workspace/catalog?section=staff', label: 'Nhân viên & giờ làm', detail: 'Sắp xếp ca phục vụ', icon: 'staff' },
+  { href: '/workspace/notifications', label: 'Thông báo', detail: 'Theo dõi hoạt động mới', icon: 'bell' },
+] as const;
+
+function QuickLinkIcon({ name }: { name: typeof quickLinks[number]['icon'] }) {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    {name === 'calendar' && <><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 10h18M8 14h3m-3 3h6"/></>}
+    {name === 'service' && <><path d="M4 7h16M4 12h10M4 17h7"/><circle cx="18" cy="16" r="3"/></>}
+    {name === 'staff' && <><circle cx="9" cy="8" r="3"/><path d="M3.5 20v-1.5a5.5 5.5 0 0 1 11 0V20zM17 8h4m-2-2v4M17 15h4"/></>}
+    {name === 'bell' && <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></>}
+  </svg>;
+}
+
 function tenantDate(date: Date, timezone: string) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map((part) => [part.type, part.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
@@ -364,9 +380,10 @@ export default function WorkspacePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [currentTime, setCurrentTime] = useState(() => new Date());
-  const [chartMode, setChartMode] = useState<BookingChartMode>('month');
+  const [chartMode, setChartMode] = useState<BookingChartMode>('week');
   const [customChartFrom, setCustomChartFrom] = useState('');
   const [customChartTo, setCustomChartTo] = useState('');
+  const [monthlyReportsEnabled, setMonthlyReportsEnabled] = useState(false);
 
   useEffect(() => {
     const updateTime = () => setCurrentTime(new Date());
@@ -378,11 +395,12 @@ export default function WorkspacePage() {
   const load = useCallback(async (tenantId: string) => {
     setLoading(true); setError('');
     try {
-      const [tenant, hours] = await Promise.all([
-        api.getCurrentTenant(tenantId), api.listBusinessHours(tenantId),
+      const [tenant, hours, billing] = await Promise.all([
+        api.getCurrentTenant(tenantId), api.listBusinessHours(tenantId), api.currentBilling(tenantId),
       ]);
       setContext(tenant);
       setBusinessHours(hours);
+      setMonthlyReportsEnabled(billing.plan.monthlyBookingReportsEnabled && billing.status === 'active' && new Date(billing.periodEnd) > new Date());
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Không tải được tổng quan tiệm.'); }
     finally { setLoading(false); }
   }, []);
@@ -405,6 +423,9 @@ export default function WorkspacePage() {
   const greeting = greetingFor(localHour, context.tenant.displayName);
   const today = tenantDate(currentTime, context.location.timezone);
   const chartRangeState: SharedChartRange = { mode: chartMode, setMode: setChartMode, customFrom: customChartFrom, setCustomFrom: setCustomChartFrom, customTo: customChartTo, setCustomTo: setCustomChartTo };
+  const chartRange = bookingChartRange(chartMode, today, customChartFrom || shiftDate(today, -6), customChartTo || today);
+  const chartRangeDays = chartRange.from && chartRange.to ? Math.floor((Date.parse(`${chartRange.to}T00:00:00Z`) - Date.parse(`${chartRange.from}T00:00:00Z`)) / 86_400_000) + 1 : 0;
+  const monthlyReportLocked = chartRangeDays > 7 && !monthlyReportsEnabled;
   const weekStart = shiftDate(today, -((weekdayFor(today) + 6) % 7));
   const weekDates = Array.from({ length: 7 }, (_, index) => shiftDate(weekStart, index));
   const weekdayLabels = ['Chủ nhật', 'Thứ hai', 'Thứ ba', 'Thứ tư', 'Thứ năm', 'Thứ sáu', 'Thứ bảy'];
@@ -427,10 +448,13 @@ export default function WorkspacePage() {
       })}</div></div>}
     </section>
     <OverviewChartRangeControls today={today} rangeState={chartRangeState}/>
-    <div className="owner-overview-grid">
+    {monthlyReportLocked ? <section className="owner-panel owner-report-locked" role="status"><div><p className="owner-kicker">BÁO CÁO THEO THÁNG</p><h2>Tính năng thuộc gói Tiệm phát triển</h2><p>Gói hiện tại vẫn xem được báo cáo theo tuần. Để xem khoảng ngày dài hơn, hãy nâng cấp lên gói có báo cáo tháng.</p></div><Link className="button button-primary" href="/workspace/billing">Xem các gói dịch vụ</Link></section> : <div className="owner-overview-grid">
       <BookingTrendChart tenantId={context.tenant.id} today={today} rangeState={chartRangeState}/>
-      <ServiceMixChart tenantId={context.tenant.id} today={today} rangeState={chartRangeState}/>
+      <section className="owner-panel owner-quick-access"><header><div><p className="owner-kicker">LỐI TẮT</p><h2>Truy cập nhanh</h2></div><span className="owner-quick-access-caption">Vận hành tiệm</span></header><nav aria-label="Truy cập nhanh trong workspace">
+        {quickLinks.map((item) => <Link href={item.href} key={item.href}><span className={`owner-quick-access-icon is-${item.icon}`}><QuickLinkIcon name={item.icon}/></span><span className="owner-quick-access-copy"><strong>{item.label}</strong><small>{item.detail}</small></span><span className="owner-quick-access-arrow" aria-hidden="true">↗</span></Link>)}
+      </nav></section>
       <BookingRevenueChart tenantId={context.tenant.id} today={today} rangeState={chartRangeState}/>
-    </div>
+      <ServiceMixChart tenantId={context.tenant.id} today={today} rangeState={chartRangeState}/>
+    </div>}
   </main>;
 }

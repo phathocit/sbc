@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  BadRequestException, ConflictException, Inject, Injectable, NotFoundException,
+  BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException,
 } from '@nestjs/common';
 import type {
   AvailabilitySlotDto, BookingCountPointDto, BookingDto, BookingRevenuePointDto, BookingScheduleSuggestionDto, BookingStatus, CreateBookingRequest, ServiceBookingCountDto,
@@ -12,7 +12,7 @@ import {
 import {
   bookingAllocations, bookingEvents, bookings, businessHours, customers,
   guestAccessTokens, idempotencyRecords, locations, outboxMessages, scheduleExceptions,
-  services, staffHours, staffProfiles, staffServices, tenantPolicies, tenants,
+  planCatalog, services, staffHours, staffProfiles, staffServices, tenantPolicies, tenantSubscriptions, tenants,
 } from '../../../../../packages/database/dist/schema/index.js';
 import { db } from '../../database';
 import { BillingService } from '../billing/billing.service';
@@ -23,6 +23,7 @@ import {
 } from './local-time';
 
 type Segment = { start: number; end: number };
+type SnapshotService = NonNullable<BookingDto['serviceSnapshot']['services']>[number];
 type AvailabilityOptions = {
   excludeBookingId?: string;
   now?: Date;
@@ -96,6 +97,16 @@ function requestHash(value: unknown): string {
 
 @Injectable()
 export class BookingService {
+  private async assertMonthlyReportsEnabled(tenantId: string, dayCount: number): Promise<void> {
+    if (dayCount <= 7) return;
+    const [plan] = await db.select({ enabled: planCatalog.monthlyBookingReportsEnabled, status: tenantSubscriptions.status, periodEnd: tenantSubscriptions.currentPeriodEnd })
+      .from(tenantSubscriptions).innerJoin(planCatalog, eq(tenantSubscriptions.planId, planCatalog.id))
+      .where(eq(tenantSubscriptions.tenantId, tenantId)).limit(1);
+    if (!plan?.enabled || plan.status !== 'active' || plan.periodEnd <= new Date()) {
+      throw new ForbiddenException({ errorCode: 'PLAN_FEATURE_UNAVAILABLE', message: 'Monthly booking reports are not included in the current plan' });
+    }
+  }
+
   constructor(@Inject(BillingService) private readonly billing: BillingService) {}
   private assertUuid(value: string, field: string): void {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? '')) {
@@ -135,7 +146,8 @@ export class BookingService {
             ? ['booking_expired', 'Lịch chờ duyệt đã hết hạn', 'Một lịch chờ duyệt đã hết hạn.']
             : null;
     if (notice) {
-      const [target] = await tx.select({ startsAt: bookings.startsAt, timezone: locations.timezone, serviceSnapshot: bookings.serviceSnapshot, status: bookings.status })
+      const [target] = await tx.select({ startsAt: bookings.startsAt, timezone: locations.timezone, serviceSnapshot: bookings.serviceSnapshot, status: bookings.status,
+        staffNames: sql<string | null>`(select string_agg(distinct sp.name, ', ') from booking_allocations ba join staff_profiles sp on sp.id = ba.staff_id and sp.tenant_id = ba.tenant_id where ba.tenant_id = ${tenantId}::uuid and ba.booking_id = ${bookings.id} and ba.active = true)` })
         .from(bookings).innerJoin(locations, eq(locations.id, bookings.locationId))
         .where(and(eq(bookings.tenantId, tenantId), eq(bookings.id, bookingId))).limit(1);
       const dateParts = target ? Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
@@ -151,7 +163,8 @@ export class BookingService {
         startsAt: target?.startsAt.toISOString() ?? '',
         ...(typeof previousStartsAt === 'string' ? { previousStartsAt } : {}),
         timezone: target?.timezone ?? 'Asia/Ho_Chi_Minh',
-        services: serviceRows.map((service) => ({ name: service.name, ...(service.startsAt ? { startsAt: service.startsAt } : {}) })),
+        ...(target?.staffNames ? { staffName: target.staffNames } : {}),
+        services: serviceRows.map((service: SnapshotService) => ({ name: service.name, ...(service.startsAt ? { startsAt: service.startsAt } : {}) })),
       });
     }
   }
@@ -651,6 +664,7 @@ export class BookingService {
     const toDay = new Date(`${toDate}T00:00:00.000Z`);
     const dayCount = Math.floor((toDay.getTime() - fromDay.getTime()) / 86_400_000) + 1;
     if (dayCount > 366) throw new BadRequestException('Booking analytics date range must not exceed 366 days');
+    await this.assertMonthlyReportsEnabled(tenantId, dayCount);
 
     const [location] = await db.select({ timezone: locations.timezone }).from(locations).where(and(
       eq(locations.tenantId, tenantId), eq(locations.id, locationId), eq(locations.active, true),
@@ -683,6 +697,7 @@ export class BookingService {
     const toDay = new Date(`${toDate}T00:00:00.000Z`);
     const dayCount = Math.floor((toDay.getTime() - fromDay.getTime()) / 86_400_000) + 1;
     if (dayCount > 366) throw new BadRequestException('Booking analytics date range must not exceed 366 days');
+    await this.assertMonthlyReportsEnabled(tenantId, dayCount);
 
     const [location] = await db.select({ timezone: locations.timezone }).from(locations).where(and(
       eq(locations.tenantId, tenantId), eq(locations.id, locationId), eq(locations.active, true),
@@ -722,6 +737,7 @@ export class BookingService {
     const toDay = new Date(`${toDate}T00:00:00.000Z`);
     const dayCount = Math.floor((toDay.getTime() - fromDay.getTime()) / 86_400_000) + 1;
     if (dayCount > 366) throw new BadRequestException('Booking analytics date range must not exceed 366 days');
+    await this.assertMonthlyReportsEnabled(tenantId, dayCount);
 
     const [location] = await db.select({ timezone: locations.timezone }).from(locations).where(and(
       eq(locations.tenantId, tenantId), eq(locations.id, locationId), eq(locations.active, true),
@@ -799,7 +815,7 @@ export class BookingService {
       if (booking.startsAt <= now) throw new ConflictException({ errorCode: 'BOOKING_ALREADY_STARTED', message: 'A booking cannot be rescheduled after it has started' });
       if (actorType === 'guest' && booking.startsAt.getTime() - now.getTime() < booking.policySnapshot.rescheduleCutoffMinutes * 60_000) throw new ConflictException({ errorCode: 'RESCHEDULE_CUTOFF_PASSED', message: 'The reschedule cutoff has passed' });
       if (booking.status === 'PENDING' && booking.pendingExpiresAt && booking.pendingExpiresAt <= now) throw new ConflictException({ errorCode: 'BOOKING_EXPIRED', message: 'Pending booking has expired' });
-      const snapshotServices = booking.serviceSnapshot.services ?? [];
+      const snapshotServices = (booking.serviceSnapshot.services ?? []) as SnapshotService[];
       if (snapshotServices.length > 1) {
         const requested = dto.serviceAssignments;
         if (!Array.isArray(requested) || requested.length !== snapshotServices.length) throw new BadRequestException('A new staff and time assignment is required for every service segment');

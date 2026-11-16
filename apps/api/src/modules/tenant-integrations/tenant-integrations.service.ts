@@ -2,10 +2,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type {
   ConfirmTelegramGroupRequest, SaveTenantTelegramIntegrationRequest,
-  TelegramGroupDiscoveryDto, TelegramIntegrationTestDto, TelegramPairingCodeDto, TenantTelegramIntegrationDto,
+  TelegramGroupDiscoveryDto, TelegramIntegrationTestDto, TelegramPairingCodeDto, TenantTelegramIntegrationDto, TenantTelegramDeliveryDto,
 } from '@sbc/contracts';
-import { and, eq, gt, isNull, lte, or } from 'drizzle-orm';
-import { tenantTelegramIntegrations } from '../../../../../packages/database/dist/schema/index.js';
+import { and, desc, eq, gt, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { outboxMessages, tenantNotifications, tenantTelegramIntegrations } from '../../../../../packages/database/dist/schema/index.js';
 import { db } from '../../database';
 import { decryptSystemSettings, encryptSystemSettings } from '../platform-settings/system-settings.crypto';
 
@@ -17,7 +17,7 @@ const POLL_LEASE_MS = 15_000;
 type TelegramToken = { botToken: string };
 type TelegramApiResult<T> = { ok: boolean; result?: T; error_code?: number };
 type TelegramChat = { id: number; type: string; title?: string; username?: string };
-type TelegramUpdate = { message?: { text?: string; chat?: TelegramChat } };
+type TelegramUpdate = { update_id?: number; message?: { text?: string; chat?: TelegramChat } };
 type StoredCandidate = { chatId: string; title: string | null; type: 'group' | 'supergroup' };
 
 @Injectable()
@@ -80,6 +80,34 @@ export class TenantIntegrationsService {
     return this.status(await this.row(tenantId));
   }
 
+  async deliveries(tenantId: string): Promise<TenantTelegramDeliveryDto[]> {
+    const rows = await db.select({ message: outboxMessages, title: tenantNotifications.title, occurredAt: tenantNotifications.occurredAt })
+      .from(outboxMessages).innerJoin(tenantNotifications, and(
+        eq(tenantNotifications.tenantId, tenantId),
+        sql`${outboxMessages.payload}->>'notificationId' = ${tenantNotifications.id}::text`,
+      ))
+      .where(and(eq(outboxMessages.tenantId, tenantId), eq(outboxMessages.eventType, 'tenant.telegram.notification.requested')))
+      .orderBy(desc(outboxMessages.occurredAt)).limit(50);
+    return rows.map(({ message, title, occurredAt }) => ({ id: message.id,
+      notificationId: String((message.payload as Record<string, unknown>).notificationId), title, createdAt: occurredAt.toISOString(),
+      state: message.failureReason === 'TELEGRAM_SUPPRESSED' ? 'skipped' : message.processedAt ? 'sent' : message.deadLetteredAt ? 'failed' : message.attempts > 0 ? 'retrying' : 'queued',
+      attempts: message.attempts, nextAttemptAt: message.nextAttemptAt.toISOString(), errorCode: message.failureReason,
+    }));
+  }
+
+  async retryDelivery(tenantId: string, deliveryId: string): Promise<{ queued: true }> {
+    const integration = await this.row(tenantId);
+    if (!integration?.enabled || integration.status !== 'verified') throw new ConflictException('Hãy bật và xác minh tích hợp Telegram trước khi thử gửi lại.');
+    const [row] = await db.update(outboxMessages).set({ attempts: 0, deadLetteredAt: null, failureReason: null,
+      nextAttemptAt: new Date(), leaseOwner: null, leaseUntil: null })
+      .where(and(eq(outboxMessages.id, deliveryId), eq(outboxMessages.tenantId, tenantId),
+        eq(outboxMessages.eventType, 'tenant.telegram.notification.requested'), isNull(outboxMessages.processedAt),
+        sql`${outboxMessages.deadLetteredAt} is not null`,
+        sql`exists (select 1 from tenant_notifications n where n.tenant_id = ${tenantId}::uuid and n.id::text = ${outboxMessages.payload}->>'notificationId' and n.occurred_at >= now() - interval '24 hours')`)).returning({ id: outboxMessages.id });
+    if (!row) throw new ConflictException('Thông báo không còn ở trạng thái thất bại hoặc đã được gửi lại.');
+    return { queued: true };
+  }
+
   async save(tenantId: string, userId: string, input: SaveTenantTelegramIntegrationRequest): Promise<TenantTelegramIntegrationDto> {
     if (!input || typeof input !== 'object' || (input.enabled !== undefined && typeof input.enabled !== 'boolean')) {
       throw new BadRequestException('Thông tin cấu hình Telegram không hợp lệ.');
@@ -97,7 +125,7 @@ export class TenantIntegrationsService {
       ...(encrypted ? { botTokenCiphertext: encrypted.ciphertext, botTokenIv: encrypted.iv, botTokenAuthTag: encrypted.authTag } : {}),
       ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
       ...(changedToken ? {
-        botUsername: null, chatId: null, chatTitle: null, chatType: null, enabled: false, status: 'saved',
+        botId: null, botUsername: null, chatId: null, chatTitle: null, chatType: null, enabled: false, status: 'saved', updateOffset: 0,
         lastCheckedAt: null, lastVerifiedAt: null, lastErrorCode: null,
         lastDeliveryAt: null, lastDeliveryStatus: null, lastDeliveryErrorCode: null,
         pairingCodeHash: null, pairingExpiresAt: null, candidateChats: [],
@@ -165,26 +193,29 @@ export class TenantIntegrationsService {
         or(isNull(tenantTelegramIntegrations.pollingUntil), lte(tenantTelegramIntegrations.pollingUntil, now))))
       .returning();
     if (!leased) throw new ConflictException({ errorCode: 'TELEGRAM_POLL_IN_PROGRESS', message: 'Đang dò nhóm Telegram. Vui lòng đợi một chút rồi thử lại.' });
+    const pairingCodeHash = leased.pairingCodeHash;
+    if (!pairingCodeHash) throw new ConflictException('Mã kết nối Telegram đã hết hạn.');
     try {
-      const updates = await this.call<TelegramUpdate[]>(token, 'getUpdates', { timeout: 8, allowed_updates: ['message'] }, 11_000);
+      const updates = await this.call<TelegramUpdate[]>(token, 'getUpdates', { timeout: 8, allowed_updates: ['message'], ...(leased.updateOffset > 0 ? { offset: leased.updateOffset } : {}) }, 11_000);
       const candidates = new Map<string, StoredCandidate>();
       for (const update of updates) {
         const message = update.message;
         const chat = message?.chat;
         if (!message?.text || !chat || (chat.type !== 'group' && chat.type !== 'supergroup')) continue;
         const match = message.text.trim().match(/^\/connect(?:@[A-Za-z0-9_]+)?\s+([A-Fa-f0-9]{12})\s*$/);
-        if (!match || createHash('sha256').update(match[1].toUpperCase()).digest('hex') !== leased.pairingCodeHash) continue;
+        if (!match || createHash('sha256').update(match[1].toUpperCase()).digest('hex') !== pairingCodeHash) continue;
         const chatId = String(chat.id);
         candidates.set(chatId, { chatId, title: typeof chat.title === 'string' ? chat.title.slice(0, 255) : null, type: chat.type });
       }
       const found = [...candidates.values()];
-      await db.update(tenantTelegramIntegrations).set({ candidateChats: found, pollingUntil: null, updatedAt: new Date() })
-        .where(and(eq(tenantTelegramIntegrations.tenantId, tenantId), eq(tenantTelegramIntegrations.pairingCodeHash, leased.pairingCodeHash)));
+      const nextOffset = updates.reduce((max, update) => Number.isSafeInteger(update.update_id) ? Math.max(max, update.update_id! + 1) : max, leased.updateOffset);
+      await db.update(tenantTelegramIntegrations).set({ candidateChats: found, updateOffset: nextOffset, pollingUntil: null, updatedAt: new Date() })
+        .where(and(eq(tenantTelegramIntegrations.tenantId, tenantId), eq(tenantTelegramIntegrations.pairingCodeHash, pairingCodeHash)));
       return { candidates: found, pairingExpiresAt: leased.pairingExpiresAt!.toISOString() };
     } catch (error) {
       await db.update(tenantTelegramIntegrations).set({ pollingUntil: null }).where(and(
         eq(tenantTelegramIntegrations.tenantId, tenantId),
-        eq(tenantTelegramIntegrations.pairingCodeHash, leased.pairingCodeHash),
+        eq(tenantTelegramIntegrations.pairingCodeHash, pairingCodeHash),
       ));
       if (error instanceof Error && error.message === 'TELEGRAM_WEBHOOK_ACTIVE') {
         throw new ConflictException({ errorCode: 'TELEGRAM_WEBHOOK_ACTIVE', message: 'Bot đang bật webhook. Hãy tắt webhook trong cấu hình bot rồi thử lại.' });
@@ -203,7 +234,7 @@ export class TenantIntegrationsService {
     const candidate = row.candidateChats.find((item) => item.chatId === input.chatId);
     if (!candidate) throw new ConflictException({ errorCode: 'TELEGRAM_GROUP_NOT_DISCOVERED', message: 'Nhóm này chưa được xác nhận bằng mã liên kết. Hãy dò nhóm lại.' });
     const [updated] = await db.update(tenantTelegramIntegrations).set({
-      chatId: candidate.chatId, chatTitle: candidate.title, chatType: candidate.type,
+      chatId: candidate.chatId, chatTitle: candidate.title, chatType: candidate.type, topicThreads: {},
       status: 'saved', enabled: false, lastCheckedAt: null, lastVerifiedAt: null, lastErrorCode: null,
       lastDeliveryAt: null, lastDeliveryStatus: null, lastDeliveryErrorCode: null,
       pairingCodeHash: null, pairingExpiresAt: null, candidateChats: [], pollingUntil: null, updatedAt: new Date(),
@@ -223,20 +254,27 @@ export class TenantIntegrationsService {
     const checkedAt = new Date();
     try {
       const token = this.decryptToken(row);
-      const bot = await this.call<{ username?: string }>(token, 'getMe');
-      if (!bot.username) throw new Error('TELEGRAM_BOT_INVALID');
-      await this.call(token, 'sendMessage', { chat_id: row.chatId, text: 'ZenBook: Kết nối Telegram thành công. Bạn sẽ nhận thông báo workspace tại nhóm này.' });
+      const bot = await this.call<{ id?: number; username?: string }>(token, 'getMe');
+      if (!bot.username || !Number.isSafeInteger(bot.id)) throw new Error('TELEGRAM_BOT_INVALID');
+      const [used] = await db.select({ tenantId: tenantTelegramIntegrations.tenantId }).from(tenantTelegramIntegrations)
+        .where(and(eq(tenantTelegramIntegrations.botId, String(bot.id)), ne(tenantTelegramIntegrations.tenantId, tenantId))).limit(1);
+      if (used) throw new Error('TELEGRAM_BOT_IN_USE');
+      const topic = await this.call<{ message_thread_id?: number }>(token, 'createForumTopic', { chat_id: row.chatId, name: 'Lịch hẹn' });
+      if (!Number.isSafeInteger(topic.message_thread_id)) throw new Error('TELEGRAM_TOPIC_CREATE_FAILED');
+      await this.call(token, 'sendMessage', { chat_id: row.chatId, message_thread_id: topic.message_thread_id, text: 'ZenBook: Kết nối Telegram thành công. Đây là topic Lịch hẹn.' });
       await db.update(tenantTelegramIntegrations).set({
-        botUsername: bot.username, status: 'verified', lastCheckedAt: checkedAt, lastVerifiedAt: checkedAt,
-        lastErrorCode: null, updatedAt: checkedAt,
+        botId: String(bot.id), botUsername: bot.username, status: 'verified', lastCheckedAt: checkedAt, lastVerifiedAt: checkedAt,
+        topicThreads: { booking_created: topic.message_thread_id }, lastErrorCode: null, updatedAt: checkedAt,
       }).where(eq(tenantTelegramIntegrations.tenantId, tenantId));
       return { verified: true, botUsername: bot.username, groupTitle: row.chatTitle, checkedAt: checkedAt.toISOString() };
     } catch (error) {
-      const code = error instanceof Error && ['TELEGRAM_WEBHOOK_ACTIVE', 'TELEGRAM_TOKEN_INVALID'].includes(error.message)
-        ? error.message : 'TELEGRAM_GROUP_UNREACHABLE';
-      await db.update(tenantTelegramIntegrations).set({ status: 'failed', lastCheckedAt: checkedAt, lastErrorCode: code, updatedAt: checkedAt })
+      const dbCode = error && typeof error === 'object' && 'code' in error && error.code === '23505' ? 'TELEGRAM_BOT_IN_USE' : null;
+      const code = dbCode ?? (error instanceof Error && ['TELEGRAM_WEBHOOK_ACTIVE', 'TELEGRAM_TOKEN_INVALID', 'TELEGRAM_BOT_IN_USE'].includes(error.message)
+        ? error.message : 'TELEGRAM_GROUP_UNREACHABLE');
+      await db.update(tenantTelegramIntegrations).set({ status: 'failed', enabled: false, lastCheckedAt: checkedAt, lastErrorCode: code, updatedAt: checkedAt })
         .where(eq(tenantTelegramIntegrations.tenantId, tenantId));
       const message = code === 'TELEGRAM_TOKEN_INVALID' ? 'Token bot không hợp lệ.'
+        : code === 'TELEGRAM_BOT_IN_USE' ? 'Bot này đã được liên kết với một tenant khác. Mỗi tiệm cần bot riêng.'
         : code === 'TELEGRAM_WEBHOOK_ACTIVE' ? 'Bot đang bật webhook nên chưa thể kiểm tra bằng long polling.'
           : 'Không gửi được tin nhắn kiểm tra. Hãy xác nhận bot vẫn ở trong nhóm và được phép gửi tin nhắn.';
       throw new ConflictException({ errorCode: code, message });

@@ -7,13 +7,15 @@ import { api } from '@/lib/api';
 type Draft = {
   code: string; displayName: string; priceVnd: string; activeStaffLimit: string;
   monthlyBookingLimit: string; sortOrder: string; featuresText: string; unlimited: boolean;
+  appointmentRemindersEnabled: boolean;
+  monthlyBookingReportsEnabled: boolean;
 };
 
-const blankDraft = (): Draft => ({ code: '', displayName: '', priceVnd: '', activeStaffLimit: '', monthlyBookingLimit: '', sortOrder: '', featuresText: '', unlimited: false });
+const blankDraft = (): Draft => ({ code: '', displayName: '', priceVnd: '', activeStaffLimit: '', monthlyBookingLimit: '', sortOrder: '', featuresText: '', unlimited: false, appointmentRemindersEnabled: false, monthlyBookingReportsEnabled: false });
 const draftFromPlan = (plan: PlatformPlanDto): Draft => ({
   code: plan.code, displayName: plan.displayName, priceVnd: String(plan.priceVnd), activeStaffLimit: String(plan.activeStaffLimit),
   monthlyBookingLimit: plan.monthlyBookingLimit === null ? '' : String(plan.monthlyBookingLimit), sortOrder: String(plan.sortOrder),
-  featuresText: plan.features.join('\n'), unlimited: plan.monthlyBookingLimit === null,
+  featuresText: plan.features.join('\n'), unlimited: plan.monthlyBookingLimit === null, appointmentRemindersEnabled: plan.appointmentRemindersEnabled, monthlyBookingReportsEnabled: plan.monthlyBookingReportsEnabled,
 });
 
 function money(value: number): string { return `${value.toLocaleString('vi-VN')} đ`; }
@@ -30,7 +32,7 @@ export default function PlatformPlansPanel({ plans, onChanged }: { plans: Platfo
   const [message, setMessage] = useState('');
 
   const hasEnteredData = Boolean(draft.code.trim() || draft.displayName.trim() || draft.priceVnd || draft.activeStaffLimit
-    || draft.monthlyBookingLimit || draft.sortOrder || draft.featuresText.trim() || draft.unlimited);
+      || draft.monthlyBookingLimit || draft.sortOrder || draft.featuresText.trim() || draft.unlimited || draft.appointmentRemindersEnabled || draft.monthlyBookingReportsEnabled);
 
   const closeModal = () => { setModalOpen(false); setConfirmClose(false); setEditingPlan(null); setDraft(blankDraft()); setError(''); };
   const nudge = () => { setBumping(true); window.setTimeout(() => setBumping(false), 430); };
@@ -60,7 +62,7 @@ export default function PlatformPlansPanel({ plans, onChanged }: { plans: Platfo
     if (!draft.unlimited && !draft.monthlyBookingLimit.trim()) { setError('Nhập giới hạn lịch hoặc chọn không giới hạn.'); return; }
     const payload: UpsertPlanRequest = {
       code: draft.code.trim().toLowerCase(), displayName: draft.displayName.trim(), priceVnd: Number(draft.priceVnd),
-      activeStaffLimit: Number(draft.activeStaffLimit), monthlyBookingLimit, sortOrder: Number(draft.sortOrder),
+      activeStaffLimit: Number(draft.activeStaffLimit), monthlyBookingLimit, sortOrder: Number(draft.sortOrder), appointmentRemindersEnabled: draft.appointmentRemindersEnabled, monthlyBookingReportsEnabled: draft.monthlyBookingReportsEnabled,
       features: draft.featuresText.split('\n').map((value) => value.trim()).filter(Boolean),
     };
     setBusy(true); setError('');
@@ -90,7 +92,7 @@ export default function PlatformPlansPanel({ plans, onChanged }: { plans: Platfo
       <header><div><span className={`pa-config-status ${plan.isActive ? 'is-ready' : 'is-muted'}`}>{plan.isActive ? 'Đang mở bán' : 'Đã lưu trữ'}</span><small>{plan.code} · phiên bản {plan.version}</small></div><span className="platform-plan-subscription-count">{plan.subscriptionCount} tenant dùng</span></header>
       <h2>{plan.displayName}</h2><div className="platform-plan-price">{money(plan.priceVnd)}<small>{plan.priceVnd ? '/ tháng' : '· miễn phí'}</small></div>
       <div className="platform-plan-limits"><span><strong>{plan.activeStaffLimit}</strong> hồ sơ nhân viên</span><span><strong>{plan.monthlyBookingLimit === null ? '∞' : plan.monthlyBookingLimit}</strong> lịch mỗi kỳ</span></div>
-      <ul>{plan.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
+      <ul>{plan.features.map((feature) => <li key={feature}>{feature}</li>)}{plan.appointmentRemindersEnabled && <li>Nhắc lịch hẹn tự động</li>}{plan.monthlyBookingReportsEnabled && <li>Báo cáo lịch đặt theo tháng</li>}</ul>
       <footer>{plan.isActive ? <><button type="button" className="button button-secondary" onClick={() => openEdit(plan)}>Chỉnh sửa</button><button type="button" className="button button-danger-soft" disabled={plan.code === 'free'} title={plan.code === 'free' ? 'Gói miễn phí là gói nền bắt buộc.' : 'Ẩn khỏi bảng giá và lựa chọn gói trong form tư vấn; giữ tenant hiện tại'} onClick={() => setArchiveTarget(plan)}>Ngừng bán</button></> : <span className="platform-plan-history-note">Phiên bản cũ được giữ cho lịch sử và tenant còn tham chiếu.</span>}</footer>
     </article>)}</div>
 
@@ -107,6 +109,8 @@ export default function PlatformPlansPanel({ plans, onChanged }: { plans: Platfo
             <label>Lịch đặt mỗi kỳ<input type="number" min="0" max="10000000" disabled={draft.unlimited} required={!draft.unlimited} value={draft.monthlyBookingLimit} onChange={(event) => setDraft({ ...draft, monthlyBookingLimit: event.target.value })} /></label>
             <label>Thứ tự hiển thị<input required type="number" min="0" max="10000" value={draft.sortOrder} onChange={(event) => setDraft({ ...draft, sortOrder: event.target.value })} /></label>
             <label className="platform-plan-unlimited"><input type="checkbox" checked={draft.unlimited} onChange={(event) => setDraft({ ...draft, unlimited: event.target.checked, monthlyBookingLimit: '' })} /> Không giới hạn lịch</label>
+            <label className="platform-plan-unlimited"><input type="checkbox" checked={draft.appointmentRemindersEnabled} onChange={(event) => setDraft({ ...draft, appointmentRemindersEnabled: event.target.checked })} /> Bao gồm nhắc lịch tự động</label>
+            <label className="platform-plan-unlimited"><input type="checkbox" checked={draft.monthlyBookingReportsEnabled} onChange={(event) => setDraft({ ...draft, monthlyBookingReportsEnabled: event.target.checked })} /> Bao gồm báo cáo lịch đặt theo tháng</label>
             <label className="platform-plan-features">Quyền lợi · mỗi dòng một mục<textarea rows={5} maxLength={2500} value={draft.featuresText} onChange={(event) => setDraft({ ...draft, featuresText: event.target.value })} placeholder={'Workspace quản lý lịch hẹn\nBáo cáo lịch đặt theo tháng'} /></label>
           </div>
           <footer><button type="button" className="button button-secondary" onClick={requestClose}>Đóng</button><button type="submit" className="button button-primary" disabled={busy}>{busy ? 'Đang lưu…' : editingPlan ? 'Xuất bản phiên bản mới' : 'Tạo gói'}</button></footer>

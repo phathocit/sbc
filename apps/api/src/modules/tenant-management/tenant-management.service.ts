@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, ServiceUnavailableException, TooManyRequestsException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import type {
   CompleteTenantInvitationRequest,
   ClaimTenantInvitationRequest,
@@ -18,7 +18,7 @@ import type { User } from '@sbc/database';
 import { and, count, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { createCipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
 import type { Request } from 'express';
-import { bookings, outboxMessages, platformNotificationReads, publicRateLimits, services, staffProfiles, tenantApplications, tenantOwnerInvitations, tenants, memberships, locations, tenantPolicies, users, planCatalog, tenantSubscriptions, tenantBookingUsage, tenantPlanChanges } from '../../../../../packages/database/dist/schema/index.js';
+import { bookings, outboxMessages, platformAdminAuditEvents, platformNotificationReads, publicRateLimits, services, staffProfiles, tenantApplications, tenantOwnerInvitations, tenants, memberships, locations, tenantPolicies, users, planCatalog, tenantSubscriptions, tenantBookingUsage, tenantPlanChanges } from '../../../../../packages/database/dist/schema/index.js';
 import { db } from '../../database';
 import { PasswordService } from '../../common/crypto/password.service';
 import { systemSettingsMasterKey } from '../platform-settings/system-settings.crypto';
@@ -143,7 +143,7 @@ export class TenantManagementService {
         target: [publicRateLimits.keyHash, publicRateLimits.windowStart],
         set: { requestCount: sql`${publicRateLimits.requestCount} + 1` },
       }).returning({ requestCount: publicRateLimits.requestCount });
-    if (row && row.requestCount > 5) throw new TooManyRequestsException('Vui lòng thử lại sau một phút.');
+    if (row && row.requestCount > 5) throw new HttpException('Vui lòng thử lại sau một phút.', HttpStatus.TOO_MANY_REQUESTS);
     await db.delete(publicRateLimits).where(lt(publicRateLimits.createdAt, new Date(now - 48 * 60 * 60_000)));
   }
 
@@ -241,6 +241,7 @@ export class TenantManagementService {
     if (dto.note !== undefined && typeof dto.note !== 'string') throw new BadRequestException('Ghi chú không hợp lệ.');
     const note = dto.note?.trim() || null;
     if (note && note.length > 1000) throw new BadRequestException('Ghi chú tối đa 1.000 ký tự.');
+    if (dto.decision === 'reject' && (!note || note.length < 10)) throw new BadRequestException('Cần ghi rõ lý do từ chối, tối thiểu 10 ký tự.');
 
     try {
       return await db.transaction(async (tx) => {
@@ -258,6 +259,10 @@ export class TenantManagementService {
             eventType: 'platform.tenant_application.reviewed', tenantId: null,
             payload: { applicationId: application.id, name: application.name, slug: application.slug, decision: 'rejected' },
           });
+          await tx.insert(outboxMessages).values({ eventType: 'tenant_application.rejected_email.requested', tenantId: null,
+            payload: { recipient: application.applicantEmail, recipientName: application.applicantName, tenantName: application.name, reason: note } });
+          await tx.insert(platformAdminAuditEvents).values({ actorUserId: reviewerId, entityType: 'application', entityId: application.id,
+            action: 'application.rejected', before: { status: 'pending' }, after: { status: 'rejected' }, reason: note });
           await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
           return this.mapApplication(updated, application.applicantName, application.applicantEmail);
         }
@@ -303,6 +308,8 @@ export class TenantManagementService {
           applicantUserId: applicantAccount.id, status: 'approved', reviewedBy: reviewerId, reviewedAt, reviewNote: note,
           tenantId: tenant.id, updatedAt: reviewedAt,
         }).where(and(eq(tenantApplications.id, applicationId), eq(tenantApplications.status, 'pending'))).returning();
+        await tx.insert(platformAdminAuditEvents).values({ actorUserId: reviewerId, tenantId: tenant.id, entityType: 'application', entityId: application.id,
+          action: 'application.approved', before: { status: 'pending' }, after: { status: 'approved', tenantId: tenant.id, requestedPlan: application.requestedPlan }, reason: note });
         await tx.insert(outboxMessages).values({
           eventType: 'platform.tenant_application.reviewed', tenantId: tenant.id,
           payload: { applicationId: application.id, tenantId: tenant.id, name: application.name, slug: application.slug, decision: 'approved' },
@@ -428,10 +435,23 @@ export class TenantManagementService {
       .leftJoin(memberships, and(eq(memberships.tenantId, tenants.id), eq(memberships.role, 'owner'), eq(memberships.status, 'active')))
       .leftJoin(users, eq(users.id, memberships.userId))
       .orderBy(desc(tenants.createdAt));
+    const subscriptionRows = await db.select({ tenantId: tenantSubscriptions.tenantId, periodEnd: tenantSubscriptions.currentPeriodEnd,
+      planName: planCatalog.displayName, bookingLimit: planCatalog.monthlyBookingLimit, periodStart: tenantSubscriptions.currentPeriodStart,
+    }).from(tenantSubscriptions).innerJoin(planCatalog, eq(tenantSubscriptions.planId, planCatalog.id));
+    const subscriptionsByTenant = new Map(subscriptionRows.map((row) => [row.tenantId, row]));
+    const usageRows = await db.select({ tenantId: tenantBookingUsage.tenantId, periodStart: tenantBookingUsage.periodStart,
+      bookings: tenantBookingUsage.bookingCount }).from(tenantBookingUsage)
+      .innerJoin(tenantSubscriptions, and(eq(tenantBookingUsage.tenantId, tenantSubscriptions.tenantId),
+        eq(tenantBookingUsage.periodStart, tenantSubscriptions.currentPeriodStart)));
+    const usagesByPeriod = new Map(usageRows.map((row) => [`${row.tenantId}:${row.periodStart.toISOString()}`, row.bookings]));
     return rows.map((row) => ({
       id: row.id, slug: row.slug, displayName: row.displayName, status: row.status as TenantStatus,
       createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString(),
       ownerName: row.ownerName, ownerEmail: row.ownerEmail,
+      currentPlanName: subscriptionsByTenant.get(row.id)?.planName ?? null,
+      planPeriodEnd: subscriptionsByTenant.get(row.id)?.periodEnd.toISOString() ?? null,
+      bookingUsage: subscriptionsByTenant.get(row.id) ? usagesByPeriod.get(`${row.id}:${subscriptionsByTenant.get(row.id)!.periodStart.toISOString()}`) ?? 0 : null,
+      bookingLimit: subscriptionsByTenant.get(row.id)?.bookingLimit ?? null,
     }));
   }
 
@@ -447,7 +467,7 @@ export class TenantManagementService {
       .leftJoin(locations, and(eq(locations.tenantId, tenants.id), eq(locations.active, true)))
       .where(eq(tenants.id, tenantId)).limit(1);
     if (!tenant) throw new NotFoundException('Khong tim thay tenant.');
-    const [staff, service, booking, staffRows, serviceRows, billingRows, historyRows, activeStaffUsage] = await Promise.all([
+    const [staff, service, booking, staffRows, serviceRows, billingRows, historyRows, activeStaffUsage, statusEvents] = await Promise.all([
       db.select({ value: count() }).from(staffProfiles).where(eq(staffProfiles.tenantId, tenantId)),
       db.select({ value: count() }).from(services).where(eq(services.tenantId, tenantId)),
       db.select({ value: count() }).from(bookings).where(eq(bookings.tenantId, tenantId)),
@@ -456,6 +476,9 @@ export class TenantManagementService {
       db.select({ subscription: tenantSubscriptions, plan: planCatalog }).from(tenantSubscriptions).innerJoin(planCatalog, eq(tenantSubscriptions.planId, planCatalog.id)).where(eq(tenantSubscriptions.tenantId, tenantId)).limit(1),
       db.select({ change: tenantPlanChanges, fromPlan: planCatalog.displayName }).from(tenantPlanChanges).leftJoin(planCatalog, eq(tenantPlanChanges.fromPlanId, planCatalog.id)).where(eq(tenantPlanChanges.tenantId, tenantId)).orderBy(desc(tenantPlanChanges.changedAt)).limit(20),
       db.select({ value: count() }).from(staffProfiles).where(and(eq(staffProfiles.tenantId, tenantId), eq(staffProfiles.active, true))),
+      db.select({ payload: outboxMessages.payload, occurredAt: outboxMessages.occurredAt }).from(outboxMessages)
+        .where(and(eq(outboxMessages.tenantId, tenantId), eq(outboxMessages.eventType, 'platform.tenant_status.changed')))
+        .orderBy(desc(outboxMessages.occurredAt)).limit(20),
     ]);
     const currentBilling = billingRows[0];
     const usage = currentBilling ? await db.select().from(tenantBookingUsage).where(and(
@@ -464,6 +487,17 @@ export class TenantManagementService {
     const planIds = [...new Set(historyRows.map((row) => row.change.toPlanId))];
     const changedToPlans = planIds.length ? await db.select({ id: planCatalog.id, name: planCatalog.displayName }).from(planCatalog).where(inArray(planCatalog.id, planIds)) : [];
     const planNames = new Map(changedToPlans.map((row) => [row.id, row.name]));
+    const statusActors = statusEvents.map((event) => (event.payload as Record<string, unknown> | null)?.actorUserId).filter((id): id is string => typeof id === 'string');
+    const [approvedApplication] = await db.select().from(tenantApplications).where(and(eq(tenantApplications.tenantId, tenantId), eq(tenantApplications.status, 'approved'))).orderBy(desc(tenantApplications.reviewedAt)).limit(1);
+    const [invitation] = approvedApplication ? await db.select().from(tenantOwnerInvitations).where(eq(tenantOwnerInvitations.applicationId, approvedApplication.id)).orderBy(desc(tenantOwnerInvitations.expiresAt)).limit(1) : [];
+    const [invitationDelivery] = approvedApplication ? await db.select({ processedAt: outboxMessages.processedAt,
+      deadLetteredAt: outboxMessages.deadLetteredAt, failureReason: outboxMessages.failureReason }).from(outboxMessages)
+      .where(and(eq(outboxMessages.tenantId, tenantId), eq(outboxMessages.eventType, 'tenant_owner_invitation.requested')))
+      .orderBy(desc(outboxMessages.occurredAt)).limit(1) : [];
+    const actorIds = [...new Set([...statusActors, ...historyRows.map((row) => row.change.actorUserId).filter((id): id is string => Boolean(id)), ...(approvedApplication?.reviewedBy ? [approvedApplication.reviewedBy] : [])])];
+    const actorRows = actorIds.length ? await db.select({ id: users.id, name: users.displayName }).from(users).where(inArray(users.id, actorIds)) : [];
+    const actorNames = new Map(actorRows.map((row) => [row.id, row.name]));
+    const [ownerAccount] = approvedApplication?.applicantUserId ? await db.select({ accountStatus: users.accountStatus }).from(users).where(eq(users.id, approvedApplication.applicantUserId)).limit(1) : [];
     return {
       id: tenant.id, slug: tenant.slug, displayName: tenant.displayName, status: tenant.status as TenantStatus,
       createdAt: tenant.createdAt.toISOString(), updatedAt: tenant.updatedAt.toISOString(),
@@ -477,7 +511,21 @@ export class TenantManagementService {
         status: currentBilling.subscription.status as 'active' | 'past_due' | 'expired', periodStart: currentBilling.subscription.currentPeriodStart.toISOString(),
         periodEnd: currentBilling.subscription.currentPeriodEnd.toISOString(), usage: { activeStaff: Number(activeStaffUsage[0]?.value ?? 0), bookings: usage[0]?.bookingCount ?? 0, bookingLimit: currentBilling.plan.monthlyBookingLimit },
       } : null,
-      planChanges: historyRows.map(({ change, fromPlan }) => ({ fromPlan, toPlan: planNames.get(change.toPlanId) ?? 'Gói đã lưu trữ', note: change.note, changedAt: change.changedAt.toISOString() })),
+      planChanges: historyRows.map(({ change, fromPlan }) => ({ fromPlan, toPlan: planNames.get(change.toPlanId) ?? 'Gói đã lưu trữ', note: change.note,
+        changedAt: change.changedAt.toISOString(), changeType: change.changeType, actorName: change.actorUserId ? actorNames.get(change.actorUserId) ?? 'Quản trị viên' : 'Hệ thống' })),
+      onboarding: approvedApplication ? { applicantEmail: approvedApplication.applicantEmail,
+        requestedPlanName: (await db.select({ name: planCatalog.displayName }).from(planCatalog).where(eq(planCatalog.code, approvedApplication.requestedPlan)).orderBy(desc(planCatalog.version)).limit(1))[0]?.name ?? approvedApplication.requestedPlan,
+        reviewedAt: approvedApplication.reviewedAt?.toISOString() ?? null,
+        reviewerName: approvedApplication.reviewedBy ? actorNames.get(approvedApplication.reviewedBy) ?? 'Quản trị viên' : null,
+        invitationStatus: !invitation ? (ownerAccount?.accountStatus === 'active' ? 'not_required' : 'missing') : invitation.usedAt ? 'used' : invitation.revokedAt ? 'revoked' : invitation.expiresAt <= new Date() ? 'expired' : 'pending',
+        ownerAccountStatus: ownerAccount?.accountStatus ?? null,
+        invitationDeliveryStatus: !invitationDelivery ? null : invitationDelivery.processedAt ? 'sent' : invitationDelivery.deadLetteredAt ? 'failed' : 'queued',
+        invitationDeliveryError: invitationDelivery?.failureReason ?? null,
+      } : null,
+      statusChanges: statusEvents.map((event) => { const payload = event.payload as Record<string, unknown> | null; return {
+        from: String(payload?.previousStatus ?? ''), to: String(payload?.status ?? ''), reason: String(payload?.reason ?? ''),
+        actorName: actorNames.get(String(payload?.actorUserId ?? '')) ?? 'Quản trị viên', changedAt: event.occurredAt.toISOString(),
+      }; }),
       staffProfiles: staffRows, services: serviceRows,
     };
   }
@@ -485,14 +533,16 @@ export class TenantManagementService {
   async listNotifications(userId: string): Promise<PlatformNotificationDto[]> {
     const rows = await db.select().from(outboxMessages)
       .where(inArray(outboxMessages.eventType, [
-        'platform.tenant_application.submitted', 'platform.tenant_application.reviewed',
+        'platform.tenant_application.submitted', 'platform.tenant_application.reviewed', 'platform.tenant_status.changed',
+        'platform.support_ticket.created', 'platform.support_ticket.replied', 'platform.billing.review_required',
+        'platform.billing.payment_paid', 'platform.billing.payment_failed',
       ]))
       .orderBy(desc(outboxMessages.occurredAt)).limit(50);
     const readRows = rows.length ? await db.select({ notificationId: platformNotificationReads.notificationId })
       .from(platformNotificationReads)
       .where(and(eq(platformNotificationReads.userId, userId), inArray(platformNotificationReads.notificationId, rows.map((row) => row.id)))) : [];
     const readIds = new Set(readRows.map((row) => row.notificationId));
-    return rows.flatMap((row) => {
+    return rows.flatMap((row): PlatformNotificationDto[] => {
       if (!row.payload || typeof row.payload !== 'object' || Array.isArray(row.payload)) return [];
       const payload = row.payload as Record<string, unknown>;
       if (row.eventType === 'platform.tenant_application.submitted' && typeof payload.name === 'string' && typeof payload.slug === 'string') {
@@ -502,6 +552,23 @@ export class TenantManagementService {
         const approved = payload.decision === 'approved';
         return [{ id: row.id, type: 'tenant_application_reviewed', title: approved ? 'Tenant đã được duyệt' : 'Hồ sơ đã bị từ chối', description: `${payload.name} · /${payload.slug}`, occurredAt: row.occurredAt.toISOString(), isRead: readIds.has(row.id), tenantId: typeof payload.tenantId === 'string' ? payload.tenantId : null, applicationId: typeof payload.applicationId === 'string' ? payload.applicationId : null }];
       }
+      if (row.eventType === 'platform.tenant_status.changed') return [{ id: row.id, type: 'tenant_status_changed', title: payload.status === 'suspended' ? 'Tenant tạm ngưng' : 'Tenant hoạt động lại',
+        description: `${String(payload.name ?? 'Tenant')} · ${String(payload.reason ?? '')}`, occurredAt: row.occurredAt.toISOString(), isRead: readIds.has(row.id),
+        tenantId: typeof payload.tenantId === 'string' ? payload.tenantId : row.tenantId, applicationId: null }];
+      if (row.eventType === 'platform.support_ticket.created' || row.eventType === 'platform.support_ticket.replied') return [{ id: row.id,
+        type: row.eventType === 'platform.support_ticket.created' ? 'support_ticket_created' : 'support_ticket_replied',
+        title: row.eventType === 'platform.support_ticket.created' ? 'Ticket hỗ trợ mới' : 'Tenant trả lời ticket',
+        description: String(payload.title ?? payload.subject ?? 'Yêu cầu hỗ trợ cần xem'), occurredAt: row.occurredAt.toISOString(), isRead: readIds.has(row.id),
+        tenantId: row.tenantId, applicationId: null, ticketId: typeof payload.ticketId === 'string' ? payload.ticketId : null }];
+      if (row.eventType === 'platform.billing.review_required') return [{ id: row.id, type: 'billing_review_required', title: 'Thanh toán cần xử lý',
+        description: `Đơn ${String(payload.orderId ?? '').slice(0, 8)} · ${String(payload.provider ?? '').toUpperCase()}`, occurredAt: row.occurredAt.toISOString(), isRead: readIds.has(row.id),
+        tenantId: row.tenantId, applicationId: null, orderId: typeof payload.orderId === 'string' ? payload.orderId : null }];
+      if (row.eventType === 'platform.billing.payment_paid' || row.eventType === 'platform.billing.payment_failed') return [{ id: row.id,
+        type: row.eventType === 'platform.billing.payment_paid' ? 'billing_payment_paid' : 'billing_payment_failed',
+        title: row.eventType === 'platform.billing.payment_paid' ? 'Thanh toán thành công' : 'Thanh toán thất bại',
+        description: `${String(payload.planName ?? 'Gói dịch vụ')} · ${String(payload.provider ?? '').toUpperCase()} · ${Number(payload.amountVnd ?? 0).toLocaleString('vi-VN')} đ`,
+        occurredAt: row.occurredAt.toISOString(), isRead: readIds.has(row.id), tenantId: row.tenantId, applicationId: null,
+        orderId: typeof payload.orderId === 'string' ? payload.orderId : null }];
       return [];
     });
   }
@@ -509,17 +576,33 @@ export class TenantManagementService {
   async markNotificationRead(userId: string, notificationId: string): Promise<{ read: true }> {
     const [notification] = await db.select({ id: outboxMessages.id }).from(outboxMessages).where(and(
       eq(outboxMessages.id, notificationId),
-      inArray(outboxMessages.eventType, ['platform.tenant_application.submitted', 'platform.tenant_application.reviewed']),
+      inArray(outboxMessages.eventType, ['platform.tenant_application.submitted', 'platform.tenant_application.reviewed', 'platform.tenant_status.changed',
+        'platform.support_ticket.created', 'platform.support_ticket.replied', 'platform.billing.review_required', 'platform.billing.payment_paid', 'platform.billing.payment_failed']),
     )).limit(1);
     if (!notification) throw new NotFoundException('Không tìm thấy thông báo.');
     await db.insert(platformNotificationReads).values({ userId, notificationId }).onConflictDoNothing();
     return { read: true };
   }
 
-  async updateTenantStatus(tenantId: string, dto: UpdateTenantStatusRequest): Promise<PlatformTenantDto> {
+  async updateTenantStatus(tenantId: string, actor: User, dto: UpdateTenantStatusRequest): Promise<PlatformTenantDto> {
     if (!dto || (dto.status !== 'active' && dto.status !== 'suspended')) throw new BadRequestException('Trạng thái tenant không hợp lệ.');
-    const [tenant] = await db.update(tenants).set({ status: dto.status, updatedAt: new Date() })
-      .where(eq(tenants.id, tenantId)).returning();
+    const reason = typeof dto.reason === 'string' ? dto.reason.trim() : '';
+    if (reason.length < 10 || reason.length > 500) throw new BadRequestException('Lý do phải dài từ 10 đến 500 ký tự.');
+    if (typeof dto.currentPassword !== 'string' || !actor.passwordHash || !await this.passwords.verifyPassword(dto.currentPassword, actor.passwordHash)) {
+      throw new UnauthorizedException('Mật khẩu quản trị không chính xác.');
+    }
+    const tenant = await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(tenants).where(eq(tenants.id, tenantId)).for('update').limit(1);
+      if (!current) throw new NotFoundException('Không tìm thấy tenant.');
+      if (current.status === dto.status) throw new ConflictException('Trạng thái tenant đã được cập nhật. Hãy tải lại danh sách.');
+      const [updated] = await tx.update(tenants).set({ status: dto.status, updatedAt: new Date() }).where(eq(tenants.id, tenantId)).returning();
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId: actor.id, tenantId, entityType: 'tenant', entityId: tenantId,
+        action: 'tenant.status_changed', before: { status: current.status }, after: { status: dto.status }, reason });
+      await tx.insert(outboxMessages).values({ eventType: 'platform.tenant_status.changed', tenantId,
+        payload: { tenantId, name: updated.displayName, slug: updated.slug, status: dto.status, reason, actorUserId: actor.id, previousStatus: current.status } });
+      await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
+      return updated;
+    });
     if (!tenant) throw new NotFoundException('Không tìm thấy tenant.');
     const [owner] = await db.select({ name: users.displayName, email: users.email }).from(memberships)
       .innerJoin(users, eq(users.id, memberships.userId))
@@ -530,5 +613,43 @@ export class TenantManagementService {
       createdAt: tenant.createdAt.toISOString(), updatedAt: tenant.updatedAt.toISOString(),
       ownerName: owner?.name ?? null, ownerEmail: owner?.email ?? null,
     };
+  }
+
+  async resendOwnerInvitation(tenantId: string, actor: User, currentPassword: string): Promise<{ queued: true }> {
+    if (typeof currentPassword !== 'string' || !actor.passwordHash || !await this.passwords.verifyPassword(currentPassword, actor.passwordHash)) {
+      throw new UnauthorizedException('Mật khẩu quản trị không chính xác.');
+    }
+    await db.transaction(async (tx) => {
+      const [tenant] = await tx.select({ id: tenants.id, status: tenants.status }).from(tenants).where(eq(tenants.id, tenantId)).for('update').limit(1);
+      if (!tenant) throw new NotFoundException('Không tìm thấy tenant.');
+      if (tenant.status !== 'active') throw new ConflictException('Cần kích hoạt tenant trước khi gửi lời mời.');
+      const [application] = await tx.select().from(tenantApplications).where(and(eq(tenantApplications.tenantId, tenantId), eq(tenantApplications.status, 'approved'))).orderBy(desc(tenantApplications.reviewedAt)).limit(1);
+      if (!application) throw new ConflictException('Tenant này không có hồ sơ đăng ký đã duyệt.');
+      const [account] = application.applicantUserId ? await tx.select({ accountStatus: users.accountStatus }).from(users).where(eq(users.id, application.applicantUserId)).limit(1) : [];
+      if (account?.accountStatus === 'active') throw new ConflictException('Tài khoản chủ tiệm đã kích hoạt.');
+      const [invitation] = await tx.select().from(tenantOwnerInvitations).where(eq(tenantOwnerInvitations.applicationId, application.id)).for('update').limit(1);
+      const now = new Date();
+      if (invitation?.usedAt) throw new ConflictException('Lời mời đã được sử dụng.');
+      if (invitation && now.getTime() - invitation.createdAt.getTime() < 5 * 60_000) throw new HttpException('Chỉ có thể gửi lại sau 5 phút.', HttpStatus.TOO_MANY_REQUESTS);
+      const [delivery] = await tx.select({ processedAt: outboxMessages.processedAt, deadLetteredAt: outboxMessages.deadLetteredAt }).from(outboxMessages)
+        .where(and(eq(outboxMessages.tenantId, tenantId), eq(outboxMessages.eventType, 'tenant_owner_invitation.requested')))
+        .orderBy(desc(outboxMessages.occurredAt)).limit(1);
+      if (delivery && !delivery.processedAt && !delivery.deadLetteredAt) throw new ConflictException('Email lời mời trước vẫn đang chờ gửi hoặc thử lại. Hãy kiểm tra worker trước.');
+      const token = randomBytes(32).toString('base64url');
+      const iv = randomBytes(12);
+      const cipher = createCipheriv('aes-256-gcm', systemSettingsMasterKey(), iv);
+      const ciphertext = Buffer.concat([cipher.update(JSON.stringify({ recipient: application.applicantEmail, recipientName: application.applicantName,
+        tenantName: application.name, tenantSlug: application.slug, token }), 'utf8'), cipher.final()]);
+      const expiresAt = new Date(now.getTime() + 48 * 60 * 60_000);
+      if (invitation) await tx.update(tenantOwnerInvitations).set({ tokenHash: createHash('sha256').update(token).digest('hex'),
+        expiresAt, revokedAt: null, usedAt: null, createdAt: now }).where(eq(tenantOwnerInvitations.id, invitation.id));
+      else await tx.insert(tenantOwnerInvitations).values({ applicationId: application.id, tenantId,
+        tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt });
+      await tx.insert(outboxMessages).values({ eventType: 'tenant_owner_invitation.requested', tenantId,
+        payload: { encryption: 'aes-256-gcm-v1', iv: iv.toString('base64url'), tag: cipher.getAuthTag().toString('base64url'), ciphertext: ciphertext.toString('base64url') } });
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId: actor.id, tenantId, entityType: 'tenant', entityId: tenantId,
+        action: 'tenant.invitation_resent', after: { applicationId: application.id, expiresAt: expiresAt.toISOString() } });
+    });
+    return { queued: true };
   }
 }

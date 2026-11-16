@@ -20,6 +20,8 @@ export * from "./idempotency-records.js";
 export * from "./outbox-messages.js";
 export * from "./guest-access.js";
 export * from "./platform-settings.js";
+export * from "./platform-telegram-integrations.js";
+export * from "./platform-admin-audit-events.js";
 export * from "./tenant-applications.js";
 export * from "./billing.js";
 export * from "./platform-notification-reads.js";

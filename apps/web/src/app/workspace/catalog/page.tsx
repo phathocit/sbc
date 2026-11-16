@@ -72,6 +72,7 @@ export default function CatalogWorkspacePage() {
   const [savedPolicies, setSavedPolicies] = useState<TenantPolicyDto | null>(null);
   const [reminderEnabled, setReminderEnabled] = useState(true);
   const [reminderMinutes, setReminderMinutes] = useState('30');
+  const [remindersIncluded, setRemindersIncluded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -196,14 +197,15 @@ export default function CatalogWorkspacePage() {
     setLoading(true);
     setError('');
     try {
-      const [current, serviceRows, staffRows, hours, exceptionRows, policyRows, shiftTemplates] = await Promise.all([
+      const [current, serviceRows, staffRows, hours, exceptionRows, policyRows, shiftTemplates, billing] = await Promise.all([
         api.getCurrentTenant(activeTenantId), api.listServices(activeTenantId),
         api.listStaff(activeTenantId), api.listBusinessHours(activeTenantId),
-        api.listScheduleExceptions(activeTenantId), api.getPolicies(activeTenantId), api.listStaffShiftTemplates(activeTenantId),
+        api.listScheduleExceptions(activeTenantId), api.getPolicies(activeTenantId), api.listStaffShiftTemplates(activeTenantId), api.currentBilling(activeTenantId),
       ]);
       const staffSchedules = await Promise.all(staffRows.map(async (person) => [person.id, await api.listStaffHours(activeTenantId, person.id)] as const));
       setContext(current); setServices(serviceRows); setStaff(staffRows); setStaffShiftTemplates(shiftTemplates); setBusinessHours(hours); setExceptions(exceptionRows); setPolicies(policyRows); setSavedPolicies(policyRows);
       setReminderEnabled(policyRows.appointmentReminderMinutes !== null); setReminderMinutes(String(policyRows.appointmentReminderMinutes ?? 30));
+      setRemindersIncluded(billing.plan.appointmentRemindersEnabled && billing.status === 'active' && new Date(billing.periodEnd) > new Date());
       setStaffHoursById(Object.fromEntries(staffSchedules));
       if (!businessIntervalsInitialized.current) {
         setBusinessIntervalsByDay(Object.fromEntries(Array.from({ length: 7 }, (_, weekday) => [weekday, intervalsFromRows(hours, weekday)])));
@@ -430,7 +432,7 @@ export default function CatalogWorkspacePage() {
           <label className="owner-policy-row"><span><strong>Thời gian báo trước tối thiểu</strong><small>Ngăn khách đặt lịch quá sát giờ hiện tại để tiệm có thời gian chuẩn bị.</small></span><span className="owner-policy-input"><input disabled={!canEdit} style={fieldStyle} type="number" min="0" max="4320" value={policies.minLeadMinutes} onChange={(e) => setPolicies({ ...policies, minLeadMinutes: Number(e.target.value) })}/><small>phút</small></span></label>
           <label className="owner-policy-row"><span><strong>Khoảng thời gian đặt trước</strong><small>Xa nhất khách có thể xem và chọn ngày trên trang đặt lịch.</small></span><span className="owner-policy-input"><input disabled={!canEdit} style={fieldStyle} type="number" min="1" max="90" value={policies.bookingHorizonDays} onChange={(e) => setPolicies({ ...policies, bookingHorizonDays: Number(e.target.value) })}/><small>ngày</small></span></label>
           <label className="owner-policy-row"><span><strong>Bước chia khung giờ</strong><small>Khoảng cách giữa các giờ bắt đầu mà khách có thể chọn.</small></span><select disabled={!canEdit} style={fieldStyle} value={policies.slotIntervalMinutes} onChange={(e) => setPolicies({ ...policies, slotIntervalMinutes: Number(e.target.value) })}>{[5, 10, 15, 30, 60].map((value) => <option key={value} value={value}>{value} phút</option>)}</select></label>
-          <div className="owner-policy-row owner-reminder-policy-row"><span><strong>Nhắc lịch hẹn</strong><small>Nhắc chủ tiệm liên hệ khách trước giờ bắt đầu lịch đã xác nhận. Lịch chờ xác nhận vẫn có các mốc riêng ở 20, 10 và 5 phút; hủy, xác nhận hoặc hết hạn sẽ dừng các mốc chờ còn lại. Đổi giờ sẽ tính lại theo lịch mới.</small></span><span className="owner-reminder-policy-controls"><label className="owner-reminder-toggle"><input type="checkbox" checked={reminderEnabled} disabled={!canEditReminder || busy} onChange={(event) => setReminderEnabled(event.target.checked)} /><span><strong>Bật nhắc</strong></span></label><span className="owner-policy-input"><input type="number" inputMode="numeric" min={1} max={1440} step={1} value={reminderMinutes} disabled={!canEditReminder || !reminderEnabled || busy} onChange={(event) => setReminderMinutes(event.target.value)} aria-label="Số phút nhắc trước lịch đã xác nhận"/><small>phút</small></span></span></div>
+          <div className="owner-policy-row owner-reminder-policy-row"><span><strong>Nhắc lịch hẹn</strong><small>{remindersIncluded ? 'Nhắc chủ tiệm liên hệ khách trước giờ bắt đầu lịch đã xác nhận. Lịch chờ xác nhận vẫn có các mốc riêng ở 20, 10 và 5 phút; hủy, xác nhận hoặc hết hạn sẽ dừng các mốc chờ còn lại. Đổi giờ sẽ tính lại theo lịch mới.' : 'Quyền lợi có trong gói trả phí. Gói hiện tại không lên lịch nhắc mới; lịch sử nhắc cũ vẫn được lưu.'}</small></span><span className="owner-reminder-policy-controls"><label className="owner-reminder-toggle"><input type="checkbox" checked={remindersIncluded && reminderEnabled} disabled={!canEditReminder || !remindersIncluded || busy} onChange={(event) => setReminderEnabled(event.target.checked)} /><span><strong>{remindersIncluded ? 'Bật nhắc' : 'Chưa bao gồm'}</strong></span></label><span className="owner-policy-input"><input type="number" inputMode="numeric" min={1} max={1440} step={1} value={reminderMinutes} disabled={!canEditReminder || !remindersIncluded || !reminderEnabled || busy} onChange={(event) => setReminderMinutes(event.target.value)} aria-label="Số phút nhắc trước lịch đã xác nhận"/><small>phút</small></span></span></div>
           {canEdit && <div className="owner-policy-action-bar"><div><strong>Áp dụng thay đổi</strong><small>{canEditReminder ? 'Lưu toàn bộ chính sách đặt lịch và thời gian nhắc.' : 'Lưu các chính sách đặt lịch; cấu hình nhắc lịch chỉ chủ tiệm được thay đổi.'}</small></div><div className="owner-policy-action-buttons"><button type="button" className="button button-secondary" disabled={busy || !savedPolicies} onClick={() => { if (!savedPolicies || !window.confirm('Đặt lại các thay đổi chưa lưu theo chính sách hiện tại?')) return; setPolicies(savedPolicies); setReminderEnabled(savedPolicies.appointmentReminderMinutes !== null); setReminderMinutes(String(savedPolicies.appointmentReminderMinutes ?? 30)); }}>Đặt lại</button><button className="button button-primary" disabled={busy}>{busy ? 'Đang lưu…' : 'Lưu chính sách'}</button></div></div>}
         </form>}
         {!canEditReminder && <p className="owner-reminder-policy-readonly">Cấu hình nhắc lịch chỉ chủ tiệm được chỉnh sửa.</p>}

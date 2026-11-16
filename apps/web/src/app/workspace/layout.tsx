@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import Link from 'next/link';
+import { createPortal } from 'react-dom';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import type { TenantContextDto, TenantNotificationDto } from '@sbc/contracts';
+import type { PlanDto, TenantContextDto, TenantNotificationDto } from '@sbc/contracts';
 import { QRCodeSVG } from 'qrcode.react';
 import { api } from '@/lib/api';
 import { formatWorkspaceDate } from '@/lib/workspace-date';
@@ -117,22 +118,25 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
   const [notificationActionError, setNotificationActionError] = useState('');
   const [notificationToast, setNotificationToast] = useState<TenantNotificationDto | null>(null);
   const [bookingShareOpen, setBookingShareOpen] = useState(false);
-  const [bookingSharePosition, setBookingSharePosition] = useState<{ left: number; top: number } | null>(null);
+  const [sharePortalReady, setSharePortalReady] = useState(false);
   const [bookingShareUrl, setBookingShareUrl] = useState('');
   const [bookingShareMessage, setBookingShareMessage] = useState('');
   const notificationPopoverRef = useRef<HTMLElement>(null);
   const notificationButtonRef = useRef<HTMLButtonElement>(null);
-  const bookingSharePopoverRef = useRef<HTMLDivElement>(null);
+  const bookingSharePopoverRef = useRef<HTMLElement>(null);
   const bookingShareDesktopButtonRef = useRef<HTMLButtonElement>(null);
   const bookingShareMobileButtonRef = useRef<HTMLButtonElement>(null);
   const bookingShareAnchorRef = useRef<HTMLButtonElement | null>(null);
   const bookingQrRef = useRef<SVGSVGElement>(null);
+
+  useEffect(() => { setSharePortalReady(true); }, []);
   const [notificationPopoverPosition, setNotificationPopoverPosition] = useState<{ left: number; top: number } | null>(null);
   const lastNotificationId = useRef<string | null>(null);
   const notificationsInitialized = useRef(false);
   const notificationToastTimer = useRef<number | null>(null);
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [context, setContext] = useState<TenantContextDto | null>(null);
+  const [currentPlan, setCurrentPlan] = useState<PlanDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -147,10 +151,14 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
         const selected = available.find((row) => row.tenant.id === saved) ?? available[0];
         if (!selected) { router.replace('/login'); return; }
         localStorage.setItem('sbc_tenant_id', selected.tenant.id);
-        const tenant = await api.getCurrentTenant(selected.tenant.id);
+        const [tenant, billing] = await Promise.all([
+          api.getCurrentTenant(selected.tenant.id),
+          api.currentBilling(selected.tenant.id).catch(() => null),
+        ]);
         if (!active) return;
         setMemberships(available);
         setContext(tenant);
+        setCurrentPlan(billing?.plan ?? null);
       } catch (cause) {
         if (active) setError(cause instanceof Error ? cause.message : 'Không tải được không gian tiệm.');
       } finally {
@@ -232,31 +240,18 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (!bookingShareOpen) return;
-    const positionPopover = () => {
-      const rect = bookingShareAnchorRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const width = Math.min(320, window.innerWidth - 24);
-      const height = Math.min(430, window.innerHeight - 24);
-      const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
-      const top = Math.max(12, rect.top - height - 8);
-      setBookingSharePosition({ left, top });
-    };
-    positionPopover();
-    window.addEventListener('resize', positionPopover);
-    window.addEventListener('scroll', positionPopover, true);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
     const closeOutside = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (bookingSharePopoverRef.current?.contains(target)
-        || bookingShareDesktopButtonRef.current?.contains(target)
-        || bookingShareMobileButtonRef.current?.contains(target)) return;
+      if (bookingSharePopoverRef.current?.contains(target)) return;
       setBookingShareOpen(false);
     };
     const closeEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setBookingShareOpen(false); };
     document.addEventListener('pointerdown', closeOutside);
     window.addEventListener('keydown', closeEscape);
     return () => {
-      window.removeEventListener('resize', positionPopover);
-      window.removeEventListener('scroll', positionPopover, true);
+      document.body.style.overflow = previousOverflow;
       document.removeEventListener('pointerdown', closeOutside);
       window.removeEventListener('keydown', closeEscape);
     };
@@ -266,12 +261,6 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
     const next = !bookingShareOpen;
     if (next) {
       bookingShareAnchorRef.current = event.currentTarget;
-      const rect = event.currentTarget.getBoundingClientRect();
-      const width = Math.min(320, window.innerWidth - 24);
-      const height = Math.min(430, window.innerHeight - 24);
-      const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
-      const top = Math.max(12, rect.top - height - 8);
-      setBookingSharePosition({ left, top });
       setBookingShareMessage('');
     }
     setBookingShareOpen(next);
@@ -392,14 +381,14 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
         <div className="owner-sidebar-head">
           <Link className="owner-brand" href="/workspace" aria-label={`Về tổng quan ${context.tenant.displayName}`}>
             <span className="owner-brand-mark">{context.tenant.displayName.slice(0, 1).toUpperCase()}</span>
-            <span className="owner-brand-copy"><strong>{context.tenant.displayName}</strong><small>{context.role === 'owner' ? 'Chủ tiệm' : context.role === 'admin' ? 'Quản lý' : context.role === 'receptionist' ? 'Lễ tân' : 'Nhân viên'}</small></span>
+            <span className="owner-brand-copy"><strong>{context.tenant.displayName}</strong>{context.role === 'owner' && currentPlan ? <small className={`owner-brand-plan owner-brand-plan-${currentPlan.code.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`} title={`Gói hiện tại: ${currentPlan.displayName}`}><i aria-hidden="true">✦</i>{currentPlan.displayName}</small> : <small>{context.role === 'owner' ? 'Chủ tiệm' : context.role === 'admin' ? 'Quản lý' : context.role === 'receptionist' ? 'Lễ tân' : 'Nhân viên'}</small>}</span>
           </Link>
           <button type="button" className="owner-sidebar-toggle" aria-label={sidebarCollapsed ? 'Mở rộng thanh điều hướng' : 'Thu gọn thanh điều hướng'} title={sidebarCollapsed ? 'Mở rộng thanh điều hướng' : 'Thu gọn thanh điều hướng'} aria-controls="owner-navigation" aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5-6.5 6.5 6.5 6.5"/></svg></button>
           <button type="button" className="owner-mobile-logout" aria-label="Đăng xuất" onClick={() => void logout()}><Icon name="logout"/></button>
         </div>
       <div className="owner-sidebar-status-row">
         <TenantClock timezone={context.location.timezone} />
-        {notificationPopoverOpen && context.role === 'owner' && <section
+        {notificationPopoverOpen && context.role === 'owner' && sharePortalReady && createPortal(<section
           ref={notificationPopoverRef}
           className="owner-notification-popover"
           style={notificationPopoverPosition ? { left: notificationPopoverPosition.left, top: notificationPopoverPosition.top } : undefined}
@@ -424,7 +413,7 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
             </button>)}
           </div>}
           <footer className="owner-notification-popover-footer"><Link href="/workspace/notifications" onClick={() => setNotificationPopoverOpen(false)}>Xem tất cả thông báo <span aria-hidden="true">→</span></Link></footer>
-        </section>}
+        </section>, document.body)}
       </div>
       </div>
       {memberships.length > 1 && <label className="owner-tenant-switch">Chuyển tiệm<select aria-label="Chọn tiệm" value={context.tenant.id} onChange={(event) => { localStorage.setItem('sbc_tenant_id', event.target.value); window.location.reload(); }}>{memberships.map((row) => <option key={row.tenant.id} value={row.tenant.id}>{row.tenant.displayName}</option>)}</select></label>}
@@ -432,22 +421,22 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
       <p className="owner-nav-caption">KHÔNG GIAN TIỆM</p>
       <nav id="owner-navigation" className="owner-navigation" aria-label="Mục quản lý">
         {tenantNavigation.map((item) => <Link key={item.href} href={item.href} className="owner-nav-link" title={item.label} aria-current={isCurrentNavigationItem(item.href) ? 'page' : undefined}><Icon name={item.icon}/><span>{item.label}</span></Link>)}
-        {context.role === 'owner' && <button ref={bookingShareMobileButtonRef} type="button" className="owner-nav-link owner-mobile-share" title="Chia sẻ đặt lịch" aria-label="Chia sẻ đặt lịch" aria-expanded={bookingShareOpen} aria-controls="owner-booking-share-popover" onClick={toggleBookingShare}><Icon name="share"/><span>Chia sẻ đặt lịch</span></button>}
+        {context.role === 'owner' && <button ref={bookingShareMobileButtonRef} type="button" className="owner-nav-link owner-mobile-share" title="Chia sẻ đặt lịch" aria-label="Chia sẻ đặt lịch" aria-expanded={bookingShareOpen} aria-controls="owner-booking-share-modal" onClick={toggleBookingShare}><Icon name="share"/><span>Chia sẻ đặt lịch</span></button>}
         {(context.role === 'owner' || context.role === 'admin') && <Link href="/workspace/support" className="owner-nav-link owner-mobile-support" title="Hỗ trợ" aria-current={pathname.startsWith('/workspace/support') ? 'page' : undefined}><Icon name="support"/><span>Hỗ trợ</span></Link>}
         <a className="owner-nav-link owner-mobile-public" href={`/public/${encodeURIComponent(context.tenant.slug)}`} target="_blank" rel="noreferrer"><Icon name="external"/><span>Trang đặt lịch</span></a>
       </nav>
       <div className="owner-sidebar-bottom">
-        {context.role === 'owner' && <button ref={bookingShareDesktopButtonRef} type="button" className="owner-nav-link owner-booking-share-toggle" title="Chia sẻ đặt lịch" aria-label="Chia sẻ đặt lịch" aria-expanded={bookingShareOpen} aria-controls="owner-booking-share-popover" onClick={toggleBookingShare}><Icon name="share"/><span>Chia sẻ đặt lịch</span></button>}
+        {context.role === 'owner' && <button ref={bookingShareDesktopButtonRef} type="button" className="owner-nav-link owner-booking-share-toggle" title="Chia sẻ đặt lịch" aria-label="Chia sẻ đặt lịch" aria-expanded={bookingShareOpen} aria-controls="owner-booking-share-modal" onClick={toggleBookingShare}><Icon name="share"/><span>Chia sẻ đặt lịch</span></button>}
         {(context.role === 'owner' || context.role === 'admin') && <Link href="/workspace/support" className="owner-nav-link" title="Hỗ trợ" aria-current={pathname.startsWith('/workspace/support') ? 'page' : undefined}><Icon name="support"/><span>Hỗ trợ</span></Link>}
         <a className="owner-nav-link" href={`/public/${encodeURIComponent(context.tenant.slug)}`} target="_blank" rel="noreferrer" title="Trang đặt lịch"><Icon name="external"/><span>Trang đặt lịch</span></a>
         <button type="button" className="owner-nav-link owner-logout" title="Đăng xuất" onClick={() => void logout()}><Icon name="logout"/><span>Đăng xuất</span></button>
       </div>
-      {context.role === 'owner' && bookingShareOpen && <section
+      {context.role === 'owner' && bookingShareOpen && sharePortalReady && createPortal(<div className="owner-booking-share-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setBookingShareOpen(false); }}><section
         ref={bookingSharePopoverRef}
-        id="owner-booking-share-popover"
-        className="owner-booking-share-popover"
-        style={bookingSharePosition ? { left: bookingSharePosition.left, top: bookingSharePosition.top } : undefined}
+        id="owner-booking-share-modal"
+        className="owner-booking-share-modal"
         role="dialog"
+        aria-modal="true"
         aria-label="Chia sẻ trang đặt lịch"
       >
         <header><div><strong>Chia sẻ đặt lịch</strong><small>Khách mở link để chọn dịch vụ và giờ hẹn.</small></div><button type="button" aria-label="Đóng" onClick={() => setBookingShareOpen(false)}>×</button></header>
@@ -458,7 +447,7 @@ export default function WorkspaceLayout({ children }: { children: React.ReactNod
         <div className="owner-booking-share-qr">{bookingShareUrl ? <QRCodeSVG ref={bookingQrRef} value={bookingShareUrl} size={176} level="M" marginSize={4} bgColor="#ffffff" fgColor="#17251f" title={`Mã QR đặt lịch ${context.tenant.displayName}`} /> : <span>Đang tạo mã QR…</span>}<span>Quét mã để đặt lịch</span></div>
         <button type="button" className="owner-booking-share-download" disabled={!bookingShareUrl} onClick={downloadBookingQr}>Tải mã QR dạng SVG</button>
         {bookingShareMessage && <p className="owner-booking-share-message" role="status" aria-live="polite">{bookingShareMessage}</p>}
-      </section>}
+      </section></div>, document.body)}
     </aside>
     <div className="owner-workarea"><div className={`owner-content${isOverviewPage ? ' owner-content-overview' : ''}${showContentNotificationControl ? ' has-notification-control' : ''}`}>
       {showContentNotificationControl && <div className="owner-notification-content-anchor">{notificationControl}</div>}

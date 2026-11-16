@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
 import { and, asc, desc, eq, gt, gte, ilike, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
 import {
   billingOrders, memberships, paymentAttempts, paymentReconciliations, paymentRefundRequests, paymentWebhookEvents, planCatalog, staffProfiles,
-  tenantBookingUsage, tenantSubscriptions, tenantPlanChanges, tenants, users,
+  tenantBookingUsage, tenantSubscriptions, tenantPlanChanges, tenants, users, outboxMessages, platformAdminAuditEvents,
 } from '../../../../../packages/database/dist/schema/index.js';
 import { db } from '../../database';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
@@ -125,7 +125,7 @@ export class BillingService {
 
   private planDto(row: typeof planCatalog.$inferSelect): PlanDto {
     return { id: row.id, code: row.code as PlanDto['code'], version: row.version, displayName: row.displayName,
-      priceVnd: row.priceVnd, currency: 'VND', activeStaffLimit: row.activeStaffLimit, monthlyBookingLimit: row.monthlyBookingLimit,
+      priceVnd: row.priceVnd, currency: 'VND', activeStaffLimit: row.activeStaffLimit, monthlyBookingLimit: row.monthlyBookingLimit, appointmentRemindersEnabled: row.appointmentRemindersEnabled, monthlyBookingReportsEnabled: row.monthlyBookingReportsEnabled,
       sortOrder: row.sortOrder, features: Array.isArray(row.features) ? row.features.filter((item): item is string => typeof item === 'string') : [] };
   }
 
@@ -292,16 +292,23 @@ export class BillingService {
     if (search && search.length > 120) throw new BadRequestException('Billing search is too long.');
     if (search) {
       const pattern = `%${search}%`;
-      conditions.push(or(ilike(tenants.displayName, pattern), ilike(tenants.slug, pattern), ilike(owner.ownerName, pattern), ilike(owner.ownerEmail, pattern)));
+      conditions.push(or(ilike(tenants.displayName, pattern), ilike(tenants.slug, pattern), ilike(owner.ownerName, pattern), ilike(owner.ownerEmail, pattern),
+        ...(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search) ? [eq(billingOrders.id, search)] : [])));
     }
     if (filters.planCode) {
       if (!/^[a-z0-9][a-z0-9_-]{0,23}$/.test(filters.planCode)) throw new BadRequestException('Invalid plan code filter.');
       conditions.push(eq(planCatalog.code, filters.planCode));
     }
-    if (reconciliationOnly) {
+    if (reconciliationOnly || filters.needsAction) {
       conditions.push(or(
-        inArray(billingOrders.status, ['failed', 'expired', 'paid_review']),
+        eq(billingOrders.status, 'paid_review'),
         and(eq(billingOrders.status, 'pending'), lte(billingOrders.expiresAt, new Date())),
+        and(inArray(billingOrders.status, ['failed', 'expired']), sql`NOT EXISTS (
+          SELECT 1 FROM payment_reconciliations latest
+          WHERE latest.order_id = ${billingOrders.id}
+            AND latest.requested_at = (SELECT max(pr.requested_at) FROM payment_reconciliations pr WHERE pr.order_id = ${billingOrders.id})
+            AND latest.outcome = 'not_paid'
+        )`),
       ));
     } else if (filters.status) {
       if (!['pending', 'paid', 'paid_review', 'failed', 'expired', 'cancelled', 'refunded'].includes(filters.status)) throw new BadRequestException('Invalid order status filter.');
@@ -331,16 +338,20 @@ export class BillingService {
       receivedAt: paymentWebhookEvents.receivedAt, processedAt: paymentWebhookEvents.processedAt,
     }).from(paymentWebhookEvents).where(inArray(paymentWebhookEvents.orderId, ids)).orderBy(desc(paymentWebhookEvents.receivedAt)) : [];
     const refunds = ids.length ? await db.select().from(paymentRefundRequests).where(inArray(paymentRefundRequests.orderId, ids)).orderBy(desc(paymentRefundRequests.requestedAt)) : [];
+    const reconciliations = ids.length ? await db.select().from(paymentReconciliations).where(inArray(paymentReconciliations.orderId, ids)).orderBy(desc(paymentReconciliations.requestedAt)) : [];
     const latestAttempt = new Map<string, typeof attempts[number]>();
     for (const attempt of attempts) if (!latestAttempt.has(attempt.orderId)) latestAttempt.set(attempt.orderId, attempt);
     const latestEvent = new Map<string, typeof events[number]>();
     for (const event of events) if (!latestEvent.has(event.orderId)) latestEvent.set(event.orderId, event);
     const latestRefund = new Map<string, typeof refunds[number]>();
     for (const refund of refunds) if (!latestRefund.has(refund.orderId)) latestRefund.set(refund.orderId, refund);
+    const latestReconciliation = new Map<string, typeof reconciliations[number]>();
+    for (const reconciliation of reconciliations) if (!latestReconciliation.has(reconciliation.orderId)) latestReconciliation.set(reconciliation.orderId, reconciliation);
     const items: PlatformBillingOrderDto[] = rows.map(({ order, tenant, plan, ownerName, ownerEmail }) => {
       const attempt = latestAttempt.get(order.id);
       const event = latestEvent.get(order.id);
       const refund = latestRefund.get(order.id);
+      const reconciliation = latestReconciliation.get(order.id);
       return {
         id: order.id, tenantId: tenant.id, tenantName: tenant.displayName, tenantSlug: tenant.slug,
         ownerName: ownerName ?? null, ownerEmail: ownerEmail ?? null, planCode: plan.code, planName: plan.displayName,
@@ -351,6 +362,8 @@ export class BillingService {
           createdAt: attempt.createdAt.toISOString(), completedAt: attempt.completedAt?.toISOString() ?? null } : null,
         webhook: event ? { status: event.status, signatureVerified: event.signatureVerified,
           receivedAt: event.receivedAt.toISOString(), processedAt: event.processedAt?.toISOString() ?? null } : null,
+        reconciliation: reconciliation ? { outcome: reconciliation.outcome, message: reconciliation.message,
+          requestedAt: reconciliation.requestedAt.toISOString(), completedAt: reconciliation.completedAt?.toISOString() ?? null } : null,
         refund: refund ? { id: refund.id, status: refund.status as NonNullable<PlatformBillingOrderDto['refund']>['status'],
           amountVnd: refund.amountVnd, reason: refund.reason, providerReference: maskedReference(refund.providerTransactionId),
           message: refund.message ?? null, requestedAt: refund.requestedAt.toISOString(), completedAt: refund.completedAt?.toISOString() ?? null } : null,
@@ -703,10 +716,10 @@ export class BillingService {
     if (input.monthlyBookingLimit !== null && (!Number.isSafeInteger(input.monthlyBookingLimit) || input.monthlyBookingLimit < 0 || input.monthlyBookingLimit > 10_000_000)) throw new BadRequestException('Giới hạn lịch đặt không hợp lệ.');
     if (!Number.isSafeInteger(input.sortOrder) || input.sortOrder < 0 || input.sortOrder > 10_000) throw new BadRequestException('Thứ tự hiển thị không hợp lệ.');
     if (features.length > 20 || features.some((value) => value.length > 120)) throw new BadRequestException('Tối đa 20 quyền lợi, mỗi quyền lợi tối đa 120 ký tự.');
-    return { code, displayName, priceVnd: input.priceVnd, activeStaffLimit: input.activeStaffLimit, monthlyBookingLimit: input.monthlyBookingLimit, sortOrder: input.sortOrder, features };
+    return { code, displayName, priceVnd: input.priceVnd, activeStaffLimit: input.activeStaffLimit, monthlyBookingLimit: input.monthlyBookingLimit, sortOrder: input.sortOrder, features, appointmentRemindersEnabled: input.appointmentRemindersEnabled === true, monthlyBookingReportsEnabled: input.monthlyBookingReportsEnabled === true };
   }
 
-  async createPlanVersion(input: UpsertPlanRequest): Promise<PlatformPlanDto> {
+  async createPlanVersion(input: UpsertPlanRequest, actorUserId: string): Promise<PlatformPlanDto> {
     const value = this.validatePlan(input);
     const created = await db.transaction(async (tx) => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'plan-code:' + value.code}, 0))`);
@@ -714,12 +727,15 @@ export class BillingService {
       const version = (rows[0]?.version ?? 0) + 1;
       await tx.update(planCatalog).set({ isActive: false }).where(and(eq(planCatalog.code, value.code), eq(planCatalog.isActive, true)));
       const [plan] = await tx.insert(planCatalog).values({ ...value, currency: 'VND', version, isActive: true }).returning();
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId, entityType: 'plan', entityId: plan.id, action: 'plan.version_created',
+        before: rows[0] ? { planId: rows[0].id, version: rows[0].version } : null,
+        after: { code: plan.code, version: plan.version, priceVnd: plan.priceVnd, activeStaffLimit: plan.activeStaffLimit, monthlyBookingLimit: plan.monthlyBookingLimit } });
       return plan;
     });
     return { ...this.planDto(created), isActive: true, subscriptionCount: 0 };
   }
 
-  async archivePlanVersion(planId: string): Promise<PlatformPlanDto> {
+  async archivePlanVersion(planId: string, actorUserId: string): Promise<PlatformPlanDto> {
     const [selected] = await db.select().from(planCatalog).where(eq(planCatalog.id, planId)).limit(1);
     if (!selected) throw new NotFoundException('Gói dịch vụ không tồn tại.');
     if (selected.code === 'free') throw new ConflictException({ errorCode: 'FREE_PLAN_REQUIRED', message: 'Không thể ngừng gói miễn phí mặc định của tenant.' });
@@ -729,6 +745,8 @@ export class BillingService {
       if (!plan) throw new NotFoundException('Gói dịch vụ không tồn tại.');
       if (!plan.isActive) throw new ConflictException({ errorCode: 'PLAN_ALREADY_ARCHIVED', message: 'Gói này đã ngừng bán.' });
       const [archived] = await tx.update(planCatalog).set({ isActive: false }).where(and(eq(planCatalog.id, planId), eq(planCatalog.isActive, true))).returning();
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId, entityType: 'plan', entityId: planId,
+        action: 'plan.archived', before: { isActive: true }, after: { isActive: false } });
       const [subscriptions] = await tx.select({ count: sql<number>`count(*) FILTER (WHERE ${tenantSubscriptions.status} = 'active' AND ${tenantSubscriptions.currentPeriodEnd} > now())::int` })
         .from(tenantSubscriptions).where(eq(tenantSubscriptions.planId, planId));
       return { ...this.planDto(archived), isActive: false, subscriptionCount: Number(subscriptions?.count ?? 0) };
@@ -771,6 +789,8 @@ export class BillingService {
       if (current) await tx.update(tenantSubscriptions).set({ planId: target.id, status: 'active', currentPeriodStart: start, currentPeriodEnd: end, updatedAt: now }).where(eq(tenantSubscriptions.tenantId, tenantId));
       else await tx.insert(tenantSubscriptions).values({ tenantId, planId: target.id, status: 'active', currentPeriodStart: start, currentPeriodEnd: end });
       await tx.insert(tenantPlanChanges).values({ tenantId, actorUserId, fromPlanId: current?.planId ?? null, toPlanId: target.id, note, changeType: 'support_grant' });
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId, tenantId, entityType: 'plan', entityId: target.id,
+        action: 'plan.support_grant', before: { planId: current?.planId ?? null }, after: { planId: target.id, periodStart: start.toISOString(), periodEnd: end.toISOString() }, reason: note });
     });
   }
 
@@ -811,6 +831,8 @@ export class BillingService {
       await tx.update(tenantSubscriptions).set({ planId: target.id, status: 'active', currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, updatedAt: now }).where(eq(tenantSubscriptions.tenantId, order.tenantId));
       await tx.update(billingOrders).set({ status: 'paid', paidAt: order.paidAt ?? now, updatedAt: now }).where(eq(billingOrders.id, order.id));
       await tx.insert(tenantPlanChanges).values({ tenantId: order.tenantId, actorUserId, fromPlanId: subscription.planId, toPlanId: target.id, note, changeType: 'paid_review_applied' });
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId, tenantId: order.tenantId, entityType: 'billing', entityId: order.id,
+        action: 'billing.late_payment_applied', before: { orderStatus: 'paid_review', planId: subscription.planId }, after: { orderStatus: 'paid', planId: target.id }, reason: note });
     });
   }
 
@@ -1177,6 +1199,9 @@ export class BillingService {
         if (superseded) {
           await tx.update(billingOrders).set({ status: 'paid_review', paidAt: order.paidAt ?? now, updatedAt: now }).where(eq(billingOrders.id, order.id));
           await tx.update(paymentAttempts).set({ status: 'succeeded', completedAt: now, providerTransactionId: transactionId || null, providerPaidAt }).where(eq(paymentAttempts.id, attempt.id));
+          await tx.insert(outboxMessages).values({ tenantId: order.tenantId, eventType: 'platform.billing.review_required',
+            payload: { orderId: order.id, tenantId: order.tenantId, provider: order.provider, amountVnd: order.amountVnd, planName: plan.displayName } });
+          await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
           await publishTenantNotification(tx, order.tenantId, 'payment_review', 'Thanh toán cần đối soát', 'Giao dịch đã ghi nhận nhưng cần kiểm tra trước khi cập nhật gói.', '/workspace/billing', {
             kind: 'payment', planName: plan.displayName, provider: order.provider,
           });
@@ -1190,6 +1215,9 @@ export class BillingService {
         await tx.update(tenantSubscriptions).set({ planId: plan.id, status: 'active', currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, updatedAt: now }).where(eq(tenantSubscriptions.tenantId, order.tenantId));
         await tx.update(billingOrders).set({ status: 'paid', paidAt: now, updatedAt: now }).where(eq(billingOrders.id, order.id));
         await tx.update(paymentAttempts).set({ status: 'succeeded', completedAt: now, providerTransactionId: transactionId || null, providerPaidAt }).where(eq(paymentAttempts.id, attempt.id));
+        await tx.insert(outboxMessages).values({ tenantId: order.tenantId, eventType: 'platform.billing.payment_paid',
+          payload: { orderId: order.id, tenantId: order.tenantId, provider: order.provider, amountVnd: order.amountVnd, planName: plan.displayName } });
+        await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
         await publishTenantNotification(tx, order.tenantId, 'payment_paid', 'Thanh toán thành công', 'Gói dịch vụ của tiệm đã được cập nhật.', '/workspace/billing', {
           kind: 'payment', planName: plan.displayName, provider: order.provider, periodEndsAt: periodEnd.toISOString(),
         });
@@ -1201,6 +1229,9 @@ export class BillingService {
         await tx.update(billingOrders).set({ status: 'failed', updatedAt: now }).where(eq(billingOrders.id, order.id));
         await tx.update(paymentAttempts).set({ status: 'failed', completedAt: now, providerTransactionId: transactionId && transactionId !== '0' ? transactionId : null }).where(eq(paymentAttempts.id, attempt.id));
         const [failedPlan] = await tx.select({ displayName: planCatalog.displayName }).from(planCatalog).where(eq(planCatalog.id, order.targetPlanId)).limit(1);
+        await tx.insert(outboxMessages).values({ tenantId: order.tenantId, eventType: 'platform.billing.payment_failed',
+          payload: { orderId: order.id, tenantId: order.tenantId, provider: order.provider, amountVnd: order.amountVnd, planName: failedPlan?.displayName ?? 'Gói đã chọn' } });
+        await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
         await publishTenantNotification(tx, order.tenantId, 'payment_failed', 'Thanh toán chưa thành công', 'Bạn có thể kiểm tra và thử thanh toán lại trong workspace.', '/workspace/billing', {
           kind: 'payment', planName: failedPlan?.displayName ?? 'Gói đã chọn', provider: order.provider,
         });

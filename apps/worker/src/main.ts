@@ -2,23 +2,30 @@ import { config } from 'dotenv';
 import { createDecipheriv, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { and, asc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import nodemailer from 'nodemailer';
 import postgres from 'postgres';
-import * as schema from '@sbc/database/schema';
-import { bookingReminderDeliveries, bookings, locations, outboxMessages, platformSettings, tenantNotifications, tenantPolicies, tenantTelegramIntegrations } from '@sbc/database/schema';
+import * as schema from '../../../packages/database/dist/schema/index.js';
+import { billingOrders, bookingReminderDeliveries, bookings, locations, outboxMessages, planCatalog, platformAdminAuditEvents, platformAdmins, platformSettings, platformTelegramIntegrations, supportMessages, supportTickets, tenantNotifications, tenantPolicies, tenantSubscriptions, tenantTelegramIntegrations, tenants, users } from '../../../packages/database/dist/schema/index.js';
 
 config({ path: resolve(__dirname, '../../../.env') });
 
 const EVENT_TYPE = 'guest_access.delivery.requested';
 const APPROVAL_EVENT_TYPE = 'tenant_application.approved_email.requested';
+const REJECTION_EVENT_TYPE = 'tenant_application.rejected_email.requested';
 const OWNER_INVITATION_EVENT_TYPE = 'tenant_owner_invitation.requested';
 const TELEGRAM_EVENT_TYPE = 'tenant.telegram.notification.requested';
-const HANDLED_EVENT_TYPES = [EVENT_TYPE, APPROVAL_EVENT_TYPE, OWNER_INVITATION_EVENT_TYPE, TELEGRAM_EVENT_TYPE];
+const PLATFORM_EVENT_TYPES = [
+  'platform.tenant_application.submitted', 'platform.tenant_application.reviewed', 'platform.tenant_status.changed',
+  'platform.support_ticket.created', 'platform.support_ticket.replied', 'platform.billing.review_required',
+  'platform.billing.payment_paid', 'platform.billing.payment_failed',
+];
+const HANDLED_EVENT_TYPES = [EVENT_TYPE, APPROVAL_EVENT_TYPE, REJECTION_EVENT_TYPE, OWNER_INVITATION_EVENT_TYPE, TELEGRAM_EVENT_TYPE, ...PLATFORM_EVENT_TYPES];
 const MAX_ATTEMPTS = readInteger('WORKER_MAX_ATTEMPTS', 8, 1, 20);
 const POLL_MS = readInteger('WORKER_POLL_MS', 2_000, 250, 60_000);
 const REMINDER_POLL_MS = readInteger('WORKER_REMINDER_POLL_MS', 10_000, 1_000, 60_000);
+const PLATFORM_TELEGRAM_POLL_MS = readInteger('WORKER_PLATFORM_TELEGRAM_POLL_MS', 5_000, 1_000, 60_000);
 const LEASE_MS = readInteger('WORKER_LEASE_MS', 90_000, 15_000, 600_000);
 const MESSAGE_TIMEOUT_MS = 30_000;
 const workerId = randomUUID();
@@ -181,7 +188,7 @@ async function sendDelivery(body: DeliveryBody, settings: DeliverySettings, mess
     const safeLink = htmlEscape(body.relativeUrl);
     await transport.sendMail({
       messageId: `<${messageId}@service-business-cloud>`,
-      from: { address: smtp.fromEmail, ...(smtp.fromName ? { name: smtp.fromName } : {}) },
+      from: { address: smtp.fromEmail, name: smtp.fromName || 'ZenBook' },
       to: body.recipient,
       subject: 'Manage your booking',
       text: `Use this secure link to manage your booking: ${body.relativeUrl}\nThis link expires soon and can only be used once.`,
@@ -220,11 +227,32 @@ async function sendApprovalEmail(body: ApprovalEmailBody, settings: DeliverySett
   try {
     await transport.sendMail({
       messageId: `<${messageId}@service-business-cloud>`,
-      from: { address: smtp.fromEmail, ...(smtp.fromName ? { name: smtp.fromName } : {}) },
+      from: { address: smtp.fromEmail, name: smtp.fromName || 'ZenBook' },
       to: body.recipient,
       subject: 'ZenBook đã duyệt hồ sơ đăng ký tenant',
       text: `Xin chào ${body.recipientName}, hồ sơ ${body.tenantName} (/${body.tenantSlug}) đã được duyệt. Bạn có thể đăng nhập để mở workspace: ${loginUrl}`,
       html: `<p>Xin chào ${safeName},</p><p>Hồ sơ <strong>${safeTenant}</strong> (/${safeSlug}) đã được duyệt.</p><p><a href="${safeUrl}">Đăng nhập để mở workspace</a></p>`,
+    });
+  } finally { transport.close(); }
+}
+
+async function sendRejectionEmail(value: unknown, settings: DeliverySettings, messageId: string): Promise<void> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DELIVERY_PAYLOAD_INVALID');
+  const body = value as Record<string, unknown>;
+  if (typeof body.recipient !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.recipient)
+    || typeof body.recipientName !== 'string' || typeof body.tenantName !== 'string'
+    || typeof body.reason !== 'string' || body.reason.length < 10 || body.reason.length > 1000) throw new Error('DELIVERY_PAYLOAD_INVALID');
+  const smtp = validateSmtp(settings);
+  const transport = nodemailer.createTransport({ host: smtp.host, port: smtp.port, secure: smtp.secure,
+    auth: smtp.username ? { user: smtp.username, pass: smtp.password ?? '' } : undefined,
+    connectionTimeout: MESSAGE_TIMEOUT_MS, greetingTimeout: MESSAGE_TIMEOUT_MS, socketTimeout: MESSAGE_TIMEOUT_MS,
+    tls: { minVersion: 'TLSv1.2' } });
+  try {
+    await transport.sendMail({ messageId: `<${messageId}@service-business-cloud>`,
+      from: { address: smtp.fromEmail, name: smtp.fromName || 'ZenBook' }, to: body.recipient,
+      subject: 'Kết quả hồ sơ đăng ký tiệm ZenBook',
+      text: `Xin chào ${body.recipientName}, hồ sơ ${body.tenantName} chưa được chấp thuận. Lý do: ${body.reason}. Bạn có thể điều chỉnh thông tin và gửi hồ sơ mới.`,
+      html: `<p>Xin chào ${htmlEscape(body.recipientName)},</p><p>Hồ sơ <strong>${htmlEscape(body.tenantName)}</strong> chưa được chấp thuận.</p><p>Lý do: ${htmlEscape(body.reason)}</p><p>Bạn có thể điều chỉnh thông tin và gửi hồ sơ mới.</p>`,
     });
   } finally { transport.close(); }
 }
@@ -269,7 +297,7 @@ async function sendOwnerInvitation(body: OwnerInvitationBody, settings: Delivery
   try {
     await transport.sendMail({
       messageId: `<${messageId}@service-business-cloud>`,
-      from: { address: smtp.fromEmail, ...(smtp.fromName ? { name: smtp.fromName } : {}) },
+      from: { address: smtp.fromEmail, name: smtp.fromName || 'ZenBook' },
       to: body.recipient,
       subject: 'ZenBook đã duyệt hồ sơ đăng ký tiệm',
       text: `Xin chào ${body.recipientName}, hồ sơ ${body.tenantName} đã được duyệt. Mở liên kết có thời hạn để tự đặt mật khẩu: ${url.toString()} . Liên kết chỉ dùng một lần và hết hạn sau 48 giờ.`,
@@ -340,6 +368,8 @@ function formatTelegramNotice(notification: { type: string; title: string; descr
       return name ? `• ${name}${time ? ` · ${time}` : ''}` : '';
     }).filter(Boolean);
     if (serviceLabels.length) lines.push('Dịch vụ:', ...serviceLabels);
+    const staffName = safeTelegramLine(details.staffName, 100);
+    if (staffName) lines.push(`Nhân viên: ${staffName}`);
     if (notification.type === 'booking_cancelled') lines.push('Tình trạng: Khung giờ đã được giải phóng.');
     if (notification.type === 'booking_expired') lines.push('Tình trạng: Lịch đã hết thời gian chờ; khung giờ được mở lại.');
     if (notification.type === 'booking_rescheduled') lines.push('Tình trạng: Lịch đã được cập nhật theo thời gian mới.');
@@ -368,11 +398,11 @@ function formatTelegramNotice(notification: { type: string; title: string; descr
   return lines.join('\n');
 }
 
-async function sendTelegramNotification(tenantId: string, value: unknown): Promise<void> {
+async function sendTelegramNotification(tenantId: string, value: unknown): Promise<boolean> {
   const { notificationId } = decodeTelegramPayload(value);
   const [integration] = await db.select().from(tenantTelegramIntegrations)
     .where(eq(tenantTelegramIntegrations.tenantId, tenantId)).limit(1);
-  if (!integration?.enabled || integration.status !== 'verified' || !integration.chatId) return;
+  if (!integration?.enabled || integration.status !== 'verified' || !integration.chatId) return false;
   const [notification] = await db.select().from(tenantNotifications)
     .where(and(eq(tenantNotifications.tenantId, tenantId), eq(tenantNotifications.id, notificationId))).limit(1);
   if (!notification) throw new Error('TELEGRAM_NOTIFICATION_MISSING');
@@ -397,19 +427,269 @@ async function sendTelegramNotification(tenantId: string, value: unknown): Promi
   const telegramPayload = decodeTelegramPayload(value);
   const text = formatTelegramNotice(notification, telegramPayload, actionUrl);
   try {
+    const topicThreads = integration.topicThreads && typeof integration.topicThreads === 'object' ? integration.topicThreads as Record<string, number> : {};
+    let messageThreadId = topicThreads[notification.type];
+    if (!messageThreadId) {
+      const lockKey = `tenant-telegram-topic:${tenantId}:${notification.type}`;
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+        const [fresh] = await tx.select({ topicThreads: tenantTelegramIntegrations.topicThreads }).from(tenantTelegramIntegrations).where(eq(tenantTelegramIntegrations.tenantId, tenantId)).limit(1);
+        const freshTopics = fresh?.topicThreads && typeof fresh.topicThreads === 'object' ? fresh.topicThreads as Record<string, number> : {};
+        messageThreadId = freshTopics[notification.type];
+        if (!messageThreadId) {
+          const topicName = notification.type === 'booking_created' ? 'Lịch hẹn' : notification.type
+            .replace(/^booking_/, 'Lịch hẹn · ').replace(/^payment_/, 'Thanh toán · ').replaceAll('_', ' ').slice(0, 120);
+          const topic = await fetch(`https://api.telegram.org/bot${secret.botToken}/createForumTopic`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: integration.chatId, name: topicName }), signal: AbortSignal.timeout(MESSAGE_TIMEOUT_MS) });
+          const result = await topic.json().catch(() => undefined) as { ok?: boolean; result?: { message_thread_id?: number } } | undefined;
+          if (!topic.ok || !result?.ok || !Number.isSafeInteger(result.result?.message_thread_id)) throw new Error('TELEGRAM_TOPIC_CREATE_FAILED');
+          messageThreadId = result.result!.message_thread_id!;
+          await tx.update(tenantTelegramIntegrations).set({ topicThreads: { ...freshTopics, [notification.type]: messageThreadId }, updatedAt: new Date() }).where(eq(tenantTelegramIntegrations.tenantId, tenantId));
+        }
+      });
+    }
     const response = await fetch(`https://api.telegram.org/bot${secret.botToken}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: integration.chatId, text }), signal: AbortSignal.timeout(MESSAGE_TIMEOUT_MS),
+      body: JSON.stringify({ chat_id: integration.chatId, message_thread_id: messageThreadId, text }), signal: AbortSignal.timeout(MESSAGE_TIMEOUT_MS),
     });
-    const result = await response.json().catch(() => undefined) as { ok?: boolean; error_code?: number } | undefined;
-    if (!response.ok || !result?.ok) throw new Error(result?.error_code === 403 ? 'TELEGRAM_GROUP_UNREACHABLE' : result?.error_code === 401 ? 'TELEGRAM_TOKEN_INVALID' : 'TELEGRAM_SEND_FAILED');
+    const result = await response.json().catch(() => undefined) as { ok?: boolean; error_code?: number; parameters?: { retry_after?: number; migrate_to_chat_id?: number }; description?: string } | undefined;
+    if (!response.ok || !result?.ok) {
+      if (result?.parameters?.retry_after) throw new Error(`TELEGRAM_RATE_LIMIT:${result.parameters.retry_after}`);
+      if (result?.parameters?.migrate_to_chat_id) {
+        await db.update(tenantTelegramIntegrations).set({ chatId: String(result.parameters.migrate_to_chat_id), chatType: 'supergroup', updatedAt: new Date() }).where(eq(tenantTelegramIntegrations.tenantId, tenantId));
+        throw new Error('TELEGRAM_GROUP_MIGRATED');
+      }
+      if (result?.error_code === 401) throw new Error('TELEGRAM_TOKEN_INVALID');
+      if (result?.error_code === 403) throw new Error('TELEGRAM_GROUP_UNREACHABLE');
+      throw new Error('TELEGRAM_SEND_FAILED');
+    }
     await db.update(tenantTelegramIntegrations).set({ lastDeliveryAt: new Date(), lastDeliveryStatus: 'sent', lastDeliveryErrorCode: null })
       .where(eq(tenantTelegramIntegrations.tenantId, tenantId));
+    return true;
   } catch (error) {
     const code = error instanceof Error && /^TELEGRAM_[A-Z_]+$/.test(error.message) ? error.message : 'TELEGRAM_SEND_FAILED';
-    await db.update(tenantTelegramIntegrations).set({ lastDeliveryAt: new Date(), lastDeliveryStatus: 'failed', lastDeliveryErrorCode: code })
+    const permanent = ['TELEGRAM_TOKEN_INVALID', 'TELEGRAM_GROUP_UNREACHABLE'].includes(code);
+    await db.update(tenantTelegramIntegrations).set({ lastDeliveryAt: new Date(), lastDeliveryStatus: 'failed', lastDeliveryErrorCode: code,
+      ...(permanent ? { enabled: false, status: 'failed' } : {}) })
       .where(eq(tenantTelegramIntegrations.tenantId, tenantId));
     throw new Error(code);
+  }
+}
+
+async function platformAlertText(row: typeof outboxMessages.$inferSelect): Promise<string> {
+  const payload = row.payload && typeof row.payload === 'object' && !Array.isArray(row.payload)
+    ? row.payload as Record<string, unknown> : {};
+  let heading = '🔔 ZENBOOK PLATFORM';
+  const lines: string[] = [];
+  let path = '/platform';
+  if (row.eventType === 'platform.tenant_application.submitted') {
+    heading = '📋 HỒ SƠ ĐĂNG KÝ MỚI'; path = '/platform?tab=applications';
+    lines.push(`Tiệm: ${safeTelegramLine(payload.name, 100)}`, `Đường dẫn: /${safeTelegramLine(payload.slug, 100)}`, 'Cần làm: xem và duyệt hồ sơ trên Platform.');
+  } else if (row.eventType === 'platform.tenant_application.reviewed') {
+    heading = payload.decision === 'approved' ? '✅ HỒ SƠ ĐÃ DUYỆT' : '↩️ HỒ SƠ ĐÃ TỪ CHỐI'; path = '/platform?tab=applications';
+    lines.push(`Tiệm: ${safeTelegramLine(payload.name, 100)}`);
+  } else if (row.eventType === 'platform.tenant_status.changed') {
+    heading = '🏪 TRẠNG THÁI TENANT THAY ĐỔI'; path = '/platform?tab=tenants';
+    lines.push(`Tiệm: ${safeTelegramLine(payload.name, 100)}`, `Trạng thái: ${payload.status === 'suspended' ? 'Tạm ngưng' : 'Hoạt động'}`,
+      `Lý do: ${safeTelegramLine(payload.reason, 300)}`);
+  } else if (row.eventType === 'platform.support_ticket.created' || row.eventType === 'platform.support_ticket.replied') {
+    const ticketId = typeof payload.ticketId === 'string' ? payload.ticketId : '';
+    const [result] = await db.select({ ticket: supportTickets, tenantName: tenants.displayName }).from(supportTickets)
+      .innerJoin(tenants, eq(tenants.id, supportTickets.tenantId)).where(eq(supportTickets.id, ticketId)).limit(1);
+    if (!result) throw new Error('TELEGRAM_TICKET_MISSING');
+    const messageId = typeof payload.messageId === 'string' && /^[0-9a-f-]{36}$/i.test(payload.messageId) ? payload.messageId : null;
+    const [message] = await db.select({ body: supportMessages.body }).from(supportMessages)
+      .where(and(eq(supportMessages.ticketId, ticketId), eq(supportMessages.tenantId, result.ticket.tenantId), eq(supportMessages.senderRole, 'tenant'),
+        ...(messageId ? [eq(supportMessages.id, messageId)] : [])))
+      .orderBy(desc(supportMessages.createdAt)).limit(1);
+    heading = row.eventType.endsWith('.created') ? '🆕 TICKET HỖ TRỢ MỚI' : '💬 TENANT ĐÃ PHẢN HỒI'; path = '/platform?tab=support';
+    lines.push(`Tiệm: ${safeTelegramLine(result.tenantName, 100)}`, `Chủ đề: ${safeTelegramLine(result.ticket.subject, 140)}`,
+      `Nội dung: ${safeTelegramLine(message?.body, 400)}`, `Mã ticket: ${ticketId}`,
+      'Trả lời: dùng Reply vào tin này hoặc /reply <mã ticket> <nội dung>.');
+  } else if (row.eventType === 'platform.billing.review_required') {
+    const orderId = typeof payload.orderId === 'string' ? payload.orderId : '';
+    const [result] = await db.select({ order: billingOrders, tenantName: tenants.displayName }).from(billingOrders)
+      .innerJoin(tenants, eq(tenants.id, billingOrders.tenantId)).where(eq(billingOrders.id, orderId)).limit(1);
+    if (!result) throw new Error('TELEGRAM_ORDER_MISSING');
+    heading = '⚠️ THANH TOÁN CẦN ĐỐI SOÁT'; path = '/platform?tab=billing&billingView=orders';
+    lines.push(`Tiệm: ${safeTelegramLine(result.tenantName, 100)}`, `Đơn: ${orderId}`,
+      `Cổng: ${result.order.provider.toUpperCase()} · ${new Intl.NumberFormat('vi-VN').format(result.order.amountVnd)} đ`,
+      'Cần làm: kiểm tra chứng từ và trạng thái nhà cung cấp trên Platform trước khi cấp quyền hoặc hoàn tiền.');
+  } else if (row.eventType === 'platform.billing.payment_paid' || row.eventType === 'platform.billing.payment_failed') {
+    heading = row.eventType === 'platform.billing.payment_paid' ? '💰 THANH TOÁN THÀNH CÔNG' : '⚠️ THANH TOÁN THẤT BẠI';
+    path = '/platform?tab=billing&billingView=orders';
+    lines.push(`Đơn: ${safeTelegramLine(payload.orderId, 40)}`, `Gói: ${safeTelegramLine(payload.planName, 100)}`,
+      `Cổng: ${safeTelegramLine(payload.provider, 20).toUpperCase()} · ${new Intl.NumberFormat('vi-VN').format(Number(payload.amountVnd ?? 0))} đ`);
+  }
+  let appUrl = '';
+  try { appUrl = (await deliverySettings()).publicAppUrl ?? ''; } catch { /* The alert still contains its action path. */ }
+  const action = appUrl ? new URL(path, appUrl).toString() : path;
+  return [heading, ...lines, `Mở Platform: ${action}`].join('\n');
+}
+
+async function sendPlatformTelegramAlert(row: typeof outboxMessages.$inferSelect): Promise<void> {
+  const [integration] = await db.select().from(platformTelegramIntegrations).where(eq(platformTelegramIntegrations.id, 1)).limit(1);
+  if (!integration?.enabled || integration.status !== 'verified' || !integration.chatId || !integration.lastVerifiedAt
+    || row.occurredAt < integration.lastVerifiedAt) return;
+  if (!integration.authorizedAdminId) {
+    await db.update(platformTelegramIntegrations).set({ enabled: false, status: 'failed', lastErrorCode: 'TELEGRAM_ADMIN_REVOKED' })
+      .where(eq(platformTelegramIntegrations.id, 1));
+    return;
+  }
+  const [authorizedAdmin] = await db.select({ id: platformAdmins.userId }).from(platformAdmins)
+    .innerJoin(users, eq(users.id, platformAdmins.userId))
+    .where(and(eq(platformAdmins.userId, integration.authorizedAdminId), eq(users.accountStatus, 'active'))).limit(1);
+  if (!authorizedAdmin) {
+    await db.update(platformTelegramIntegrations).set({ enabled: false, status: 'failed', lastErrorCode: 'TELEGRAM_ADMIN_REVOKED' })
+      .where(eq(platformTelegramIntegrations.id, 1));
+    return;
+  }
+  let token: string;
+  try {
+    token = decryptJson<TelegramBotSecret>(integration.botTokenCiphertext, integration.botTokenIv, integration.botTokenAuthTag,
+      Buffer.from(masterKeyHex, 'hex')).botToken;
+  } catch {
+    await db.update(platformTelegramIntegrations).set({ enabled: false, status: 'failed', lastDeliveryAt: new Date(), lastDeliveryStatus: 'failed',
+      lastDeliveryErrorCode: 'TELEGRAM_SECRET_UNAVAILABLE', lastErrorCode: 'TELEGRAM_SECRET_UNAVAILABLE' }).where(eq(platformTelegramIntegrations.id, 1));
+    throw new Error('TELEGRAM_SECRET_UNAVAILABLE');
+  }
+  const message = await platformAlertText(row);
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: integration.chatId, text: message }), signal: AbortSignal.timeout(MESSAGE_TIMEOUT_MS),
+    });
+    const result = await response.json().catch(() => null) as { ok?: boolean; error_code?: number } | null;
+    if (!response.ok || !result?.ok) throw new Error(result?.error_code === 403 ? 'TELEGRAM_CHAT_UNREACHABLE' : result?.error_code === 401 ? 'TELEGRAM_TOKEN_INVALID' : 'TELEGRAM_SEND_FAILED');
+    await db.update(platformTelegramIntegrations).set({ lastDeliveryAt: new Date(), lastDeliveryStatus: 'sent', lastDeliveryErrorCode: null })
+      .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.botTokenCiphertext, integration.botTokenCiphertext)));
+  } catch (error) {
+    const code = error instanceof Error && /^TELEGRAM_[A-Z_]+$/.test(error.message) ? error.message : 'TELEGRAM_SEND_FAILED';
+    await db.update(platformTelegramIntegrations).set({ lastDeliveryAt: new Date(), lastDeliveryStatus: 'failed', lastDeliveryErrorCode: code,
+      ...(code === 'TELEGRAM_TOKEN_INVALID' || code === 'TELEGRAM_CHAT_UNREACHABLE' ? { status: 'failed', enabled: false } : {}) })
+      .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.botTokenCiphertext, integration.botTokenCiphertext)));
+    throw new Error(code);
+  }
+}
+
+type PlatformTelegramUpdate = {
+  update_id: number;
+  message?: {
+    date?: number; text?: string;
+    chat?: { id: number; type: string };
+    from?: { id: number; is_bot?: boolean };
+    reply_to_message?: { text?: string; from?: { id: number } };
+  };
+};
+
+async function acknowledgePlatformTelegram(token: string, chatId: string, text: string): Promise<void> {
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text }), signal: AbortSignal.timeout(10_000),
+    });
+  } catch { /* The ticket transaction is durable; an acknowledgement failure must not replay it. */ }
+}
+
+async function processPlatformTelegramUpdate(update: PlatformTelegramUpdate, tokenCiphertext: string): Promise<string | null> {
+  return db.transaction(async (tx) => {
+    const [integration] = await tx.select().from(platformTelegramIntegrations)
+      .where(eq(platformTelegramIntegrations.id, 1)).for('update').limit(1);
+    if (!integration || integration.botTokenCiphertext !== tokenCiphertext || !integration.enabled || integration.status !== 'verified') return null;
+    if (!Number.isSafeInteger(update.update_id) || update.update_id <= integration.lastUpdateId) return null;
+    const message = update.message;
+    let answer: string | null = null;
+    const authorized = message?.chat?.type === 'private' && String(message.chat.id) === integration.chatId
+      && String(message.from?.id) === integration.chatId && !message.from?.is_bot
+      && Boolean(integration.authorizedAdminId) && (message.date ?? 0) * 1000 >= (integration.lastVerifiedAt?.getTime() ?? Number.POSITIVE_INFINITY);
+    if (authorized && typeof message?.text === 'string') {
+      const [admin] = await tx.select({ id: platformAdmins.userId }).from(platformAdmins)
+        .innerJoin(users, eq(users.id, platformAdmins.userId))
+        .where(and(eq(platformAdmins.userId, integration.authorizedAdminId!), eq(users.accountStatus, 'active'))).limit(1);
+      if (!admin) {
+        await tx.update(platformTelegramIntegrations).set({ enabled: false, status: 'failed', lastErrorCode: 'TELEGRAM_ADMIN_REVOKED' })
+          .where(eq(platformTelegramIntegrations.id, 1));
+      } else {
+        const command = message.text.match(/^\/reply(?:@\w+)?\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s+([\s\S]+)$/i);
+        const isReplyToBot = String(message.reply_to_message?.from?.id ?? '') === integration.botId;
+        const reference = isReplyToBot ? message.reply_to_message?.text?.match(/Mã ticket:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i) : null;
+        const ticketId = command?.[1] ?? reference?.[1];
+        const body = (command?.[2] ?? (reference ? message.text : '')).trim();
+        if (ticketId) {
+          if (!body || body.length > 5000) answer = 'Phản hồi cần có từ 1 đến 5000 ký tự.';
+          else {
+            const [ticket] = await tx.select().from(supportTickets).where(eq(supportTickets.id, ticketId)).for('update').limit(1);
+            if (!ticket) answer = 'Không tìm thấy ticket. Hãy kiểm tra mã ticket.';
+            else if (ticket.status !== 'waiting_admin') answer = 'Ticket hiện không chờ ZenBook phản hồi. Mở Platform để xem trạng thái mới nhất.';
+            else {
+              await tx.update(supportTickets).set({ status: 'waiting_tenant', updatedAt: new Date() }).where(eq(supportTickets.id, ticketId));
+              const [sent] = await tx.insert(supportMessages).values({ tenantId: ticket.tenantId, ticketId, senderId: integration.authorizedAdminId!, senderRole: 'platform_admin', body }).returning({ id: supportMessages.id });
+              await tx.insert(platformAdminAuditEvents).values({ actorUserId: integration.authorizedAdminId!, tenantId: ticket.tenantId,
+                entityType: 'support', entityId: ticketId, action: 'support.replied_via_telegram',
+                before: { status: 'waiting_admin' }, after: { status: 'waiting_tenant', messageId: sent.id } });
+              await tx.insert(tenantNotifications).values({ tenantId: ticket.tenantId, type: 'support_reply', title: 'ZenBook đã phản hồi yêu cầu hỗ trợ',
+                description: ticket.subject.slice(0, 500), actionPath: '/workspace/support' });
+              await tx.execute(sql`select pg_notify('tenant_notifications', ${ticket.tenantId})`);
+              answer = `Đã gửi phản hồi cho tenant.\nMã ticket: ${ticketId}`;
+            }
+          }
+        } else if (message.text.startsWith('/reply') || isReplyToBot) {
+          answer = 'Để trả lời ticket, hãy Reply vào thông báo ticket hoặc dùng /reply <mã ticket> <nội dung>.';
+        }
+      }
+    }
+    await tx.update(platformTelegramIntegrations).set({ lastUpdateId: update.update_id,
+      ...(authorized ? { lastInboundAt: new Date() } : {}) }).where(eq(platformTelegramIntegrations.id, 1));
+    return answer;
+  });
+}
+
+async function pollPlatformTelegramOnce(): Promise<void> {
+  const now = new Date();
+  const [integration] = await db.update(platformTelegramIntegrations).set({ pollLeaseOwner: workerId, pollLeaseUntil: new Date(now.getTime() + 45_000) })
+    .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.enabled, true), eq(platformTelegramIntegrations.status, 'verified'),
+      or(isNull(platformTelegramIntegrations.pollLeaseUntil), lte(platformTelegramIntegrations.pollLeaseUntil, now), eq(platformTelegramIntegrations.pollLeaseOwner, workerId))))
+    .returning();
+  if (!integration?.chatId) return;
+  let token = '';
+  try {
+    token = decryptJson<TelegramBotSecret>(integration.botTokenCiphertext, integration.botTokenIv, integration.botTokenAuthTag,
+      Buffer.from(masterKeyHex, 'hex')).botToken;
+    const response = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ offset: integration.lastUpdateId + 1, limit: 20, timeout: 8, allowed_updates: ['message'] }),
+      signal: AbortSignal.timeout(13_000),
+    });
+    const body = await response.json().catch(() => null) as { ok?: boolean; result?: PlatformTelegramUpdate[]; error_code?: number } | null;
+    if (!response.ok || !body?.ok || !Array.isArray(body.result)) {
+      const code = response.status === 409 ? 'TELEGRAM_WEBHOOK_ACTIVE' : body?.error_code === 401 ? 'TELEGRAM_TOKEN_INVALID' : 'TELEGRAM_POLL_FAILED';
+      await db.update(platformTelegramIntegrations).set({ lastErrorCode: code,
+        ...(code !== 'TELEGRAM_POLL_FAILED' ? { enabled: false, status: 'failed' } : {}) })
+        .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.botTokenCiphertext, integration.botTokenCiphertext)));
+      return;
+    }
+    for (const update of body.result) {
+      const answer = await processPlatformTelegramUpdate(update, integration.botTokenCiphertext);
+      if (answer) await acknowledgePlatformTelegram(token, integration.chatId, answer);
+    }
+    await db.update(platformTelegramIntegrations).set({ lastErrorCode: null })
+      .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.botTokenCiphertext, integration.botTokenCiphertext), eq(platformTelegramIntegrations.enabled, true)));
+  } catch (error) {
+    await db.update(platformTelegramIntegrations).set({ lastErrorCode: 'TELEGRAM_POLL_FAILED' })
+      .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.botTokenCiphertext, integration.botTokenCiphertext)));
+    throw error;
+  } finally {
+    await db.update(platformTelegramIntegrations).set({ pollLeaseOwner: null, pollLeaseUntil: null })
+      .where(and(eq(platformTelegramIntegrations.id, 1), eq(platformTelegramIntegrations.pollLeaseOwner, workerId)));
+  }
+}
+
+async function platformTelegramPollLoop(): Promise<void> {
+  while (!stopping) {
+    try { await pollPlatformTelegramOnce(); }
+    catch (error) {
+      console.warn(JSON.stringify({ event: 'platform_telegram.poll_failed', reason: error instanceof Error ? error.name : 'UnknownError' }));
+    }
+    if (!stopping) await delay(PLATFORM_TELEGRAM_POLL_MS);
   }
 }
 
@@ -454,6 +734,7 @@ async function claimOne() {
 }
 
 function failureCode(error: unknown): string {
+  if (error instanceof Error && /^TELEGRAM_RATE_LIMIT:\d+$/.test(error.message)) return error.message;
   if (error instanceof Error && /^TELEGRAM_[A-Z_]+$/.test(error.message)) return error.message;
   if (error instanceof Error && ['DELIVERY_CONFIGURATION_MISSING', 'DELIVERY_KEY_UNAVAILABLE', 'DELIVERY_PAYLOAD_INVALID'].includes(error.message)) {
     return error.message;
@@ -464,7 +745,8 @@ function failureCode(error: unknown): string {
 async function markFailed(messageId: string, attempts: number, error: unknown): Promise<'retry' | 'dead'> {
   const now = new Date();
   const code = failureCode(error);
-  if (attempts >= MAX_ATTEMPTS) {
+  const permanentTelegramFailure = ['TELEGRAM_TOKEN_INVALID', 'TELEGRAM_GROUP_UNREACHABLE'].includes(code);
+  if (attempts >= MAX_ATTEMPTS || permanentTelegramFailure) {
     await db.update(outboxMessages).set({
       failureReason: code,
       deadLetteredAt: now,
@@ -473,7 +755,8 @@ async function markFailed(messageId: string, attempts: number, error: unknown): 
     }).where(and(eq(outboxMessages.id, messageId), eq(outboxMessages.leaseOwner, workerId), isNull(outboxMessages.processedAt)));
     return 'dead';
   }
-  const baseMs = Math.min(30_000 * (2 ** Math.max(0, attempts - 1)), 6 * 60 * 60_000);
+  const retryAfter = error instanceof Error ? error.message.match(/^TELEGRAM_RATE_LIMIT:(\d+)$/) : null;
+  const baseMs = retryAfter ? Math.min(Number(retryAfter[1]) * 1000, 24 * 60 * 60_000) : Math.min(30_000 * (2 ** Math.max(0, attempts - 1)), 6 * 60 * 60_000);
   const jitter = Math.floor(baseMs * (0.75 + Math.random() * 0.5));
   await db.update(outboxMessages).set({
     failureReason: code,
@@ -508,13 +791,20 @@ async function processOne(): Promise<boolean> {
       const settings = await deliverySettings();
       const body = decodeApprovalEmail(row.payload);
       await sendApprovalEmail(body, settings, row.id);
+    } else if (row.eventType === REJECTION_EVENT_TYPE) {
+      const settings = await deliverySettings();
+      await sendRejectionEmail(row.payload, settings, row.id);
     } else if (row.eventType === OWNER_INVITATION_EVENT_TYPE) {
       const settings = await deliverySettings();
       const body = decodeOwnerInvitation(row.payload);
       await sendOwnerInvitation(body, settings, row.id);
     } else if (row.eventType === TELEGRAM_EVENT_TYPE) {
       if (!row.tenantId) throw new Error('TELEGRAM_PAYLOAD_INVALID');
-      await sendTelegramNotification(row.tenantId, row.payload);
+      const sent = await sendTelegramNotification(row.tenantId, row.payload);
+      if (!sent) await db.update(outboxMessages).set({ processedAt: new Date(), failureReason: 'TELEGRAM_SUPPRESSED', leaseOwner: null, leaseUntil: null })
+        .where(and(eq(outboxMessages.id, row.id), eq(outboxMessages.leaseOwner, workerId), isNull(outboxMessages.processedAt)));
+    } else if (PLATFORM_EVENT_TYPES.includes(row.eventType)) {
+      await sendPlatformTelegramAlert(row);
     } else throw new Error('DELIVERY_PAYLOAD_INVALID');
     await db.update(outboxMessages).set({
       ...(row.eventType === OWNER_INVITATION_EVENT_TYPE ? { payload: { delivered: true } } : {}),
@@ -524,7 +814,7 @@ async function processOne(): Promise<boolean> {
       leaseUntil: null,
     }).where(and(eq(outboxMessages.id, row.id), eq(outboxMessages.leaseOwner, workerId), isNull(outboxMessages.processedAt)));
     counters.sent += 1;
-    console.info(JSON.stringify({ event: 'guest_delivery.sent', messageId: row.id }));
+    console.info(JSON.stringify({ event: 'outbox.sent', eventType: row.eventType, messageId: row.id }));
   } catch (error) {
     const reason = failureCode(error);
     if (reason === 'DELIVERY_CONFIGURATION_MISSING' || reason === 'DELIVERY_KEY_UNAVAILABLE') {
@@ -565,8 +855,11 @@ async function processDueBookingReminders(): Promise<number> {
       timezone: locations.timezone,
       reminderMinutes: tenantPolicies.appointmentReminderMinutes,
       serviceSnapshot: bookings.serviceSnapshot,
+      staffName: sql<string | null>`(select string_agg(distinct sp.name, ', ') from booking_allocations ba join staff_profiles sp on sp.id = ba.staff_id and sp.tenant_id = ba.tenant_id where ba.tenant_id = ${bookings.tenantId} and ba.booking_id = ${bookings.id} and ba.active = true)`,
     }).from(bookings)
       .innerJoin(tenantPolicies, eq(tenantPolicies.tenantId, bookings.tenantId))
+      .innerJoin(tenantSubscriptions, eq(tenantSubscriptions.tenantId, bookings.tenantId))
+      .innerJoin(planCatalog, eq(planCatalog.id, tenantSubscriptions.planId))
       .innerJoin(locations, and(eq(locations.tenantId, bookings.tenantId), eq(locations.id, bookings.locationId)))
       .leftJoin(bookingReminderDeliveries, and(
         eq(bookingReminderDeliveries.tenantId, bookings.tenantId),
@@ -580,6 +873,9 @@ async function processDueBookingReminders(): Promise<number> {
           and(eq(bookings.status, 'PENDING'), gt(bookings.pendingExpiresAt, sql`now()`)),
         ),
         isNotNull(tenantPolicies.appointmentReminderMinutes),
+        eq(tenantSubscriptions.status, 'active'),
+        gt(tenantSubscriptions.currentPeriodEnd, sql`now()`),
+        eq(planCatalog.appointmentRemindersEnabled, true),
         gt(bookings.startsAt, sql`now()`),
         or(
           and(eq(bookings.status, 'PENDING'), lte(bookings.startsAt, sql`now() + interval '20 minutes'`)),
@@ -653,6 +949,7 @@ async function processDueBookingReminders(): Promise<number> {
               startsAt: booking.startsAt.toISOString(),
               timezone,
               reminderMinutes,
+              ...(booking.staffName ? { staffName: booking.staffName } : {}),
               services: services.map((name) => ({ name })),
             },
           },
@@ -683,6 +980,7 @@ process.on('SIGTERM', () => requestStop('SIGTERM'));
 async function run(): Promise<void> {
   await client`SELECT 1`;
   console.info(JSON.stringify({ event: 'worker.ready', workerId, pollMs: POLL_MS, leaseMs: LEASE_MS, maxAttempts: MAX_ATTEMPTS }));
+  const telegramLoop = platformTelegramPollLoop();
   try {
     while (!stopping) {
       activeWork = processOne();
@@ -709,6 +1007,7 @@ async function run(): Promise<void> {
     }
   } finally {
     if (activeWork) await activeWork;
+    await telegramLoop;
     console.info(JSON.stringify({ event: 'worker.stopped', ...counters }));
     await client.end({ timeout: 5 });
   }

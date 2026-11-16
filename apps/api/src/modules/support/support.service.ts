@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import type { CreateSupportTicketRequest, SupportTicketCategory, SupportTicketDto, SupportTicketStatus } from '@sbc/contracts';
-import { and, asc, desc, eq, ilike, ne, or } from 'drizzle-orm';
-import { billingOrders, supportMessages, supportTickets, tenants, users } from '../../../../../packages/database/dist/schema/index.js';
+import { and, asc, desc, eq, ilike, ne, or, sql } from 'drizzle-orm';
+import { billingOrders, outboxMessages, supportMessages, supportTickets, tenantNotifications, tenants, users, platformAdminAuditEvents } from '../../../../../packages/database/dist/schema/index.js';
 import { db } from '../../database';
 
 const categories = new Set<SupportTicketCategory>(['billing', 'account', 'booking', 'technical', 'other']);
@@ -59,7 +59,9 @@ export class SupportService {
     }
     const [ticket] = await db.transaction(async (tx) => {
       const [created] = await tx.insert(supportTickets).values({ tenantId, createdBy: userId, billingOrderId, subject, category, status: 'waiting_admin' }).returning();
-      await tx.insert(supportMessages).values({ tenantId, ticketId: created.id, senderId: userId, senderRole: 'tenant', body: message });
+      const [createdMessage] = await tx.insert(supportMessages).values({ tenantId, ticketId: created.id, senderId: userId, senderRole: 'tenant', body: message }).returning({ id: supportMessages.id });
+      await tx.insert(outboxMessages).values({ tenantId, eventType: 'platform.support_ticket.created', payload: { ticketId: created.id, tenantId, subject, messageId: createdMessage.id } });
+      await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
       return [created];
     });
     return this.getTenant(tenantId, ticket.id);
@@ -76,11 +78,17 @@ export class SupportService {
     return this.getPlatform(ticketId);
   }
 
-  async setStatus(ticketId: string, status: string): Promise<SupportTicketDto> {
+  async setStatus(ticketId: string, status: string, actorUserId: string): Promise<SupportTicketDto> {
     if (!statuses.has(status as SupportTicketStatus)) throw new BadRequestException('Trạng thái ticket không hợp lệ.');
     if (status === 'waiting_tenant') throw new BadRequestException('Trạng thái chờ tenant được đặt tự động khi ZenBook gửi phản hồi.');
-    const [updated] = await db.update(supportTickets).set({ status, updatedAt: new Date() }).where(eq(supportTickets.id, ticketId)).returning({ id: supportTickets.id });
-    if (!updated) throw new NotFoundException('Không tìm thấy yêu cầu hỗ trợ.');
+    await db.transaction(async (tx) => {
+      const [current] = await tx.select({ tenantId: supportTickets.tenantId, status: supportTickets.status }).from(supportTickets).where(eq(supportTickets.id, ticketId)).for('update').limit(1);
+      if (!current) throw new NotFoundException('Không tìm thấy yêu cầu hỗ trợ.');
+      if (current.status === status) return;
+      await tx.update(supportTickets).set({ status, updatedAt: new Date() }).where(eq(supportTickets.id, ticketId));
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId, tenantId: current.tenantId, entityType: 'support', entityId: ticketId,
+        action: 'support.status_changed', before: { status: current.status }, after: { status } });
+    });
     return this.getPlatform(ticketId);
   }
 
@@ -106,7 +114,18 @@ export class SupportService {
         if (current?.status === 'closed') throw new ForbiddenException('Yêu cầu đã đóng. Hãy tạo yêu cầu mới nếu cần hỗ trợ tiếp.');
         throw new ConflictException(senderRole === 'tenant' ? 'Ticket đang chờ ZenBook phản hồi.' : 'Ticket đang chờ tenant phản hồi.');
       }
-      await tx.insert(supportMessages).values({ tenantId, ticketId, senderId: userId, senderRole, body });
+      const [createdMessage] = await tx.insert(supportMessages).values({ tenantId, ticketId, senderId: userId, senderRole, body }).returning({ id: supportMessages.id });
+      if (senderRole === 'tenant') {
+        const [ticket] = await tx.select({ subject: supportTickets.subject }).from(supportTickets).where(eq(supportTickets.id, ticketId)).limit(1);
+        await tx.insert(outboxMessages).values({ tenantId, eventType: 'platform.support_ticket.replied', payload: { ticketId, tenantId, subject: ticket?.subject ?? '', messageId: createdMessage.id } });
+        await tx.execute(sql`select pg_notify('platform_notifications', 'changed')`);
+      } else {
+        await tx.insert(platformAdminAuditEvents).values({ actorUserId: userId, tenantId, entityType: 'support', entityId: ticketId,
+          action: 'support.replied', before: { status: 'waiting_admin' }, after: { status: 'waiting_tenant', messageId: createdMessage.id } });
+        await tx.insert(tenantNotifications).values({ tenantId, type: 'support_reply', title: 'ZenBook đã phản hồi yêu cầu hỗ trợ',
+          description: 'Mở ticket để xem phản hồi mới.', actionPath: '/workspace/support' });
+        await tx.execute(sql`select pg_notify('tenant_notifications', ${tenantId})`);
+      }
     });
     return senderRole === 'tenant' ? this.getTenant(tenantId, ticketId) : this.getPlatform(ticketId);
   }

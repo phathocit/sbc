@@ -25,7 +25,7 @@ export class PlatformSupportController {
   }
 
   @Patch(':ticketId/status')
-  setStatus(@Param('ticketId', new ParseUUIDPipe()) ticketId: string, @Body() body: UpdateSupportTicketStatusRequest): Promise<SupportTicketDto> {
-    return this.support.setStatus(ticketId, body?.status);
+  setStatus(@CurrentUser() user: User, @Param('ticketId', new ParseUUIDPipe()) ticketId: string, @Body() body: UpdateSupportTicketStatusRequest): Promise<SupportTicketDto> {
+    return this.support.setStatus(ticketId, body?.status, user.id);
   }
 }

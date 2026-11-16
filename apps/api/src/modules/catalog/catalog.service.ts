@@ -289,7 +289,7 @@ export class CatalogService {
       if (!staff) throw new NotFoundException('Staff profile not found in this tenant');
       staffLocationId = staff.locationId;
     }
-    const [row] = await db.transaction(async (tx) => {
+    const row = await db.transaction(async (tx) => {
       const [location] = await tx.select({ id: locations.id }).from(locations).where(and(eq(locations.tenantId, tenantId), eq(locations.id, staffLocationId))).for('update').limit(1);
       if (!location) throw new NotFoundException('Tenant location not found');
       if (dto.scope === 'location') {

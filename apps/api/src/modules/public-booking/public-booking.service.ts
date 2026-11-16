@@ -1,6 +1,6 @@
 import {
-  BadRequestException, Inject, Injectable,
-  NotFoundException, ServiceUnavailableException, TooManyRequestsException,
+  BadRequestException, HttpException, HttpStatus, Inject, Injectable,
+  NotFoundException, ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import type {
@@ -93,7 +93,7 @@ export class PublicBookingService {
     const cancelled = Number(activity?.recentCancellations ?? 0);
     // Require both sustained volume and a high cancellation ratio; ordinary cancellations do not throttle a customer.
     if (created >= 8 && cancelled >= 5 && cancelled / created >= 0.6) {
-      throw new TooManyRequestsException({ errorCode: 'REPEATED_CANCELLATION_LIMIT', message: 'Không thể nhận thêm yêu cầu đặt lịch lúc này. Vui lòng liên hệ trực tiếp với tiệm để được hỗ trợ.' });
+      throw new HttpException({ errorCode: 'REPEATED_CANCELLATION_LIMIT', message: 'Không thể nhận thêm yêu cầu đặt lịch lúc này. Vui lòng liên hệ trực tiếp với tiệm để được hỗ trợ.' }, HttpStatus.TOO_MANY_REQUESTS);
     }
   }
 
@@ -115,7 +115,7 @@ export class PublicBookingService {
         target: [publicRateLimits.keyHash, publicRateLimits.windowStart],
         set: { requestCount: sql`${publicRateLimits.requestCount} + 1` },
       }).returning({ requestCount: publicRateLimits.requestCount });
-    if (row && row.requestCount > limit) throw new TooManyRequestsException({ errorCode: 'PUBLIC_RATE_LIMITED', message: 'Too many requests; try again later' });
+    if (row && row.requestCount > limit) throw new HttpException({ errorCode: 'PUBLIC_RATE_LIMITED', message: 'Too many requests; try again later' }, HttpStatus.TOO_MANY_REQUESTS);
     // Opportunistic bounded-retention cleanup; no IP or email value is persisted.
     await db.delete(publicRateLimits).where(lt(publicRateLimits.createdAt, new Date(Date.now() - 48 * 60 * 60_000)));
   }
@@ -245,7 +245,8 @@ export class PublicBookingService {
   async requestLink(slug: string, body: GuestAccessRequest, request: Request): Promise<{ accepted: true }> {
     const email = this.normalizeEmail(body?.email);
     const context = await this.resolve(slug);
-    await this.enforceRateLimit(request, 'request-link', 4, context.tenantId, email);
+    await this.enforceRateLimit(request, 'request-link', 4, context.tenantId, email ?? undefined);
+    if (!email) return { accepted: true };
     const activeGuestKey = await this.platformSettings.activeGuestTokenKey();
     if (typeof body?.bookingId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.bookingId)) return { accepted: true };
     const [match] = await db.select({ bookingId: bookings.id })
@@ -255,8 +256,8 @@ export class PublicBookingService {
     const token = randomBytes(32).toString('base64url');
     const encryptedPayload = this.encryptDelivery(email, slug, token, activeGuestKey.keyId, activeGuestKey.key);
     await db.transaction(async (tx) => {
-      const [clock] = await tx.select({ now: sql<Date>`now()` });
-      const now = new Date(clock.now);
+      const [clock] = await tx.execute(sql`select now() as now`);
+      const now = new Date(String(clock.now));
       await tx.update(guestAccessTokens).set({ revokedAt: now }).where(and(
         eq(guestAccessTokens.tenantId, context.tenantId), eq(guestAccessTokens.bookingId, match.bookingId),
         isNull(guestAccessTokens.revokedAt), isNull(guestAccessTokens.redeemedAt),
@@ -287,8 +288,8 @@ export class PublicBookingService {
         isNull(guestAccessTokens.revokedAt), gt(guestAccessTokens.expiresAt, new Date()),
       )).for('update').limit(1);
       if (!row) return undefined;
-      const [clock] = await tx.select({ now: sql<Date>`now()` });
-      const now = new Date(clock.now);
+      const [clock] = await tx.execute(sql`select now() as now`);
+      const now = new Date(String(clock.now));
       const updated = await tx.update(guestAccessTokens).set({ redeemedAt: now }).where(and(
         eq(guestAccessTokens.id, row.id), isNull(guestAccessTokens.redeemedAt), isNull(guestAccessTokens.revokedAt), gt(guestAccessTokens.expiresAt, now),
       )).returning({ id: guestAccessTokens.id });

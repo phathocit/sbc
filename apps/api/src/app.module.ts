@@ -17,6 +17,8 @@ import { BillingModule } from './modules/billing/billing.module';
 import { TenantNotificationsModule } from './modules/tenant-notifications/tenant-notifications.module';
 import { TenantIntegrationsModule } from './modules/tenant-integrations/tenant-integrations.module';
 import { SupportModule } from './modules/support/support.module';
+import { PlatformTelegramModule } from './modules/platform-telegram/platform-telegram.module';
+import { PlatformOperationsModule } from './modules/platform-operations/platform-operations.module';
 
 @Module({
   imports: [
@@ -37,6 +39,8 @@ import { SupportModule } from './modules/support/support.module';
     TenantNotificationsModule,
     TenantIntegrationsModule,
     SupportModule,
+    PlatformTelegramModule,
+    PlatformOperationsModule,
   ],
   controllers: [HealthController],
   providers: [

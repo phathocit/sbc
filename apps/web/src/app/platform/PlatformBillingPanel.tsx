@@ -34,7 +34,7 @@ function orderStatus(order: PlatformBillingOrderDto): string {
   return ({ pending: 'Đang chờ', paid: 'Đã thanh toán', paid_review: 'Đã thu · cần xử lý', failed: 'Thất bại', expired: 'Hết hạn', cancelled: 'Đã hủy', refunded: 'Đã hoàn tiền' } as const)[order.status];
 }
 
-export default function PlatformBillingPanel({ plans, view, onViewChange, onOpenTenant }: { plans: PlatformPlanDto[]; view: BillingView; onViewChange: (view: BillingView) => void; onOpenTenant: (tenantId: string) => void }) {
+export default function PlatformBillingPanel({ plans, view, onViewChange, onOpenTenant, initialOrderId = null }: { plans: PlatformPlanDto[]; view: BillingView; onViewChange: (view: BillingView) => void; onOpenTenant: (tenantId: string) => void; initialOrderId?: string | null }) {
   const [searchText, setSearchText] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
@@ -55,6 +55,8 @@ export default function PlatformBillingPanel({ plans, view, onViewChange, onOpen
   const [actionPassword, setActionPassword] = useState('');
   const [actionReason, setActionReason] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
+
+  useEffect(() => { if (view === 'orders' && initialOrderId) { setSearchText(initialOrderId); setFilters({ search: initialOrderId, page: 1, pageSize: 20 }); } }, [initialOrderId, view]);
 
   useEffect(() => {
     let active = true;
@@ -86,7 +88,7 @@ export default function PlatformBillingPanel({ plans, view, onViewChange, onOpen
   const applyFilters = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFilters({
-      search: searchText.trim() || undefined, status: statusFilter || undefined,
+      search: searchText.trim() || undefined, status: statusFilter || undefined, needsAction: filters.needsAction,
       provider: view === 'orders' && providerFilter ? providerFilter as PlatformBillingFilters['provider'] : undefined,
       planCode: planFilter || undefined, from: view === 'orders' ? from || undefined : undefined,
       to: view === 'orders' ? to || undefined : undefined, page: 1, pageSize: 20,
@@ -155,6 +157,7 @@ export default function PlatformBillingPanel({ plans, view, onViewChange, onOpen
       <button type="button" role="tab" aria-selected={view === 'subscriptions'} className={view === 'subscriptions' ? 'is-active' : ''} onClick={() => switchView('subscriptions')}>Gói thuê bao</button>
       <button type="button" role="tab" aria-selected={view === 'orders'} className={view === 'orders' ? 'is-active' : ''} onClick={() => switchView('orders')}>Đơn thanh toán</button>
     </div>
+    {view === 'orders' && <div className="pa-config-actions"><button type="button" className={`button ${filters.needsAction ? 'button-primary' : 'button-secondary'}`} aria-pressed={Boolean(filters.needsAction)} onClick={() => setFilters((current) => ({ ...current, needsAction: !current.needsAction, page: 1 }))}>Cần đối soát{summary.paidReviewOrders + summary.stalePendingOrders > 0 ? ` · ${summary.paidReviewOrders + summary.stalePendingOrders}+` : ''}</button></div>}
 
     <form className="platform-list-toolbar platform-billing-filters" onSubmit={applyFilters}>
       <label className="platform-search"><span className="sr-only">Tìm doanh nghiệp hoặc chủ tiệm</span><span className="platform-search-control"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6"/><path d="m16 16 4.5 4.5"/></svg><input aria-label="Tìm doanh nghiệp hoặc chủ tiệm" value={searchText} maxLength={120} onChange={(event) => setSearchText(event.target.value)} placeholder="Tên tiệm, slug, email chủ tiệm" /></span></label>
@@ -189,7 +192,7 @@ export default function PlatformBillingPanel({ plans, view, onViewChange, onOpen
       {(orders?.items ?? []).map((item) => {
         const canReconcile = !['paid', 'cancelled', 'refunded'].includes(item.status) && (item.status !== 'pending' || Date.parse(item.expiresAt) <= Date.now());
         const refundOpen = item.refund && ['started', 'pending', 'unknown'].includes(item.refund.status);
-        return <tr key={item.id}><td><button type="button" className="platform-tenant-detail-link" onClick={() => onOpenTenant(item.tenantId)}>{item.tenantName}</button><small>/{item.tenantSlug}</small><small>{item.ownerName || 'Chưa có owner'} · {item.ownerEmail || 'Chưa có email'}</small></td><td><strong>{item.planName}</strong><small>{item.planCode} · phiên bản {item.planVersion}</small></td><td><strong>{formatVnd(item.amountVnd)}</strong><small>{item.provider.toUpperCase()} · {orderStatus(item)}</small><small>{item.id}</small></td><td><small>Lần thử: {item.attempt?.status ?? 'Chưa có'}</small><small>Mã giao dịch: {item.attempt?.transactionReference ?? 'Chưa có'}</small><small>Webhook: {item.webhook ? `${item.webhook.signatureVerified ? 'Đã xác minh chữ ký' : 'Chưa xác minh'} · ${item.webhook.status}` : 'Chưa nhận'}</small>{item.refund && <small>Hoàn {formatVnd(item.refund.amountVnd)} · {item.refund.status} · {item.refund.reason}</small>}</td><td><small>Tạo: {dateLabel(item.createdAt)}</small><small>Trả: {dateLabel(item.paidAt)}</small><small>Hạn: {dateLabel(item.expiresAt)}</small></td><td className="platform-billing-actions">
+        return <tr key={item.id}><td><button type="button" className="platform-tenant-detail-link" onClick={() => onOpenTenant(item.tenantId)}>{item.tenantName}</button><small>/{item.tenantSlug}</small><small>{item.ownerName || 'Chưa có owner'} · {item.ownerEmail || 'Chưa có email'}</small></td><td><strong>{item.planName}</strong><small>{item.planCode} · phiên bản {item.planVersion}</small></td><td><strong>{formatVnd(item.amountVnd)}</strong><small>{item.provider.toUpperCase()} · {orderStatus(item)}</small><small>{item.id}</small></td><td><small>Lần thử: {item.attempt?.status ?? 'Chưa có'}</small><small>Mã giao dịch: {item.attempt?.transactionReference ?? 'Chưa có'}</small><small>Webhook: {item.webhook ? `${item.webhook.signatureVerified ? 'Đã xác minh chữ ký' : 'Chưa xác minh'} · ${item.webhook.status}` : 'Chưa nhận'}</small><small>Đối soát gần nhất: {item.reconciliation ? `${item.reconciliation.outcome} · ${dateLabel(item.reconciliation.requestedAt)}${item.reconciliation.message ? ` · ${item.reconciliation.message}` : ''}` : 'Chưa đối soát'}</small>{item.refund && <small>Hoàn {formatVnd(item.refund.amountVnd)} · {item.refund.status} · {item.refund.reason}</small>}</td><td><small>Tạo: {dateLabel(item.createdAt)}</small><small>Trả: {dateLabel(item.paidAt)}</small><small>Hạn: {dateLabel(item.expiresAt)}</small></td><td className="platform-billing-actions">
           {canReconcile && <button type="button" className="button button-secondary" disabled={Boolean(reconcilingOrderId)} onClick={() => void reconcile(item.id)}>{reconcilingOrderId === item.id ? 'Đang đối soát…' : `Đối soát ${item.provider.toUpperCase()}`}</button>}
           {item.status === 'paid_review' && <button type="button" className="button button-secondary" onClick={() => openAction(item, 'apply')}>Áp dụng gói đã thu</button>}
           {refundOpen ? <button type="button" className="button button-secondary" onClick={() => openAction(item, 'refund-reconcile')}>Đối soát hoàn tiền</button> : ['paid', 'paid_review'].includes(item.status) && item.refund?.status !== 'succeeded' && <button type="button" className="button button-danger-soft" onClick={() => openAction(item, 'refund')}>Hoàn tiền</button>}

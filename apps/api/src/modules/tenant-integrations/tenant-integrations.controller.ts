@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Inject, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import type {
   ConfirmTelegramGroupRequest, SaveTenantTelegramIntegrationRequest, TenantTelegramIntegrationDto,
   TelegramGroupDiscoveryDto, TelegramIntegrationTestDto, TelegramPairingCodeDto,
+  TenantTelegramDeliveryDto,
 } from '@sbc/contracts';
 import type { User } from '@sbc/database';
 import { CurrentTenant, type RequestTenantContext } from '../../common/decorators/current-tenant.decorator';
@@ -21,6 +22,17 @@ export class TenantIntegrationsController {
   @Get()
   get(@CurrentTenant() context: RequestTenantContext): Promise<TenantTelegramIntegrationDto> {
     return this.integrations.get(context.tenant.id);
+  }
+
+  @Get('deliveries')
+  deliveries(@CurrentTenant() context: RequestTenantContext): Promise<TenantTelegramDeliveryDto[]> {
+    return this.integrations.deliveries(context.tenant.id);
+  }
+
+  @Post('deliveries/:deliveryId/retry')
+  retryDelivery(@CurrentTenant() context: RequestTenantContext, @Param('deliveryId') deliveryId: string): Promise<{ queued: true }> {
+    if (!/^[0-9a-f-]{36}$/i.test(deliveryId)) throw new BadRequestException('Mã thông báo không hợp lệ.');
+    return this.integrations.retryDelivery(context.tenant.id, deliveryId);
   }
 
   @Put()

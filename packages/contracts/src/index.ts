@@ -129,6 +129,10 @@ export interface ReviewTenantApplicationRequest {
 export interface PlatformTenantDto extends TenantDto {
   ownerName: string | null;
   ownerEmail: string | null;
+  currentPlanName?: string | null;
+  planPeriodEnd?: string | null;
+  bookingUsage?: number | null;
+  bookingLimit?: number | null;
 }
 
 export interface PlatformTenantDetailDto extends PlatformTenantDto {
@@ -145,12 +149,16 @@ export interface PlatformTenantDetailDto extends PlatformTenantDto {
     periodEnd: string;
     usage: { activeStaff: number; bookings: number; bookingLimit: number | null };
   } | null;
-  planChanges: Array<{ fromPlan: string | null; toPlan: string; note: string; changedAt: string }>;
+  planChanges: Array<{ fromPlan: string | null; toPlan: string; note: string; changedAt: string; changeType?: string; actorName?: string }>;
+  statusChanges?: Array<{ from: string; to: string; reason: string; actorName: string; changedAt: string }>;
+  onboarding?: { applicantEmail: string; requestedPlanName: string; reviewedAt: string | null; reviewerName: string | null;
+    invitationStatus: 'pending' | 'used' | 'expired' | 'revoked' | 'not_required' | 'missing'; ownerAccountStatus: string | null;
+    invitationDeliveryStatus: 'queued' | 'sent' | 'failed' | null; invitationDeliveryError: string | null } | null;
   staffProfiles: Array<{ name: string; active: boolean }>;
   services: Array<{ name: string; durationMinutes: number; priceMinor: number; currency: string; active: boolean }>;
 }
 
-export type PlatformNotificationType = "tenant_application_submitted" | "tenant_application_reviewed";
+export type PlatformNotificationType = "tenant_application_submitted" | "tenant_application_reviewed" | "tenant_status_changed" | "support_ticket_created" | "support_ticket_replied" | "billing_review_required" | "billing_payment_paid" | "billing_payment_failed";
 
 export interface TenantNotificationDto {
   id: string;
@@ -219,6 +227,44 @@ export interface TelegramIntegrationTestDto {
   checkedAt: string;
 }
 
+export interface TenantTelegramDeliveryDto {
+  id: string;
+  notificationId: string;
+  title: string;
+  createdAt: string;
+  state: 'queued' | 'retrying' | 'sent' | 'failed' | 'skipped';
+  attempts: number;
+  nextAttemptAt: string | null;
+  errorCode: string | null;
+}
+
+export interface PlatformTelegramIntegrationDto {
+  configured: boolean;
+  enabled: boolean;
+  status: 'not_configured' | 'saved' | 'verified' | 'failed';
+  botUsername: string | null;
+  chatId: string | null;
+  chatName: string | null;
+  lastCheckedAt: string | null;
+  lastVerifiedAt: string | null;
+  lastErrorCode: string | null;
+  lastDeliveryAt: string | null;
+  lastDeliveryStatus: 'sent' | 'failed' | null;
+  lastDeliveryErrorCode: string | null;
+  lastInboundAt: string | null;
+}
+
+export interface SavePlatformTelegramIntegrationRequest {
+  currentPassword: string;
+  botToken?: string;
+  enabled?: boolean;
+}
+
+export interface TestPlatformTelegramIntegrationRequest { currentPassword: string }
+export interface PlatformTelegramPairingCodeDto { commandText: string; expiresAt: string }
+export interface PlatformTelegramChatCandidate { chatId: string; name: string }
+export interface PlatformTelegramChatDiscoveryDto { candidates: PlatformTelegramChatCandidate[] }
+
 export interface PlatformNotificationDto {
   id: string;
   type: PlatformNotificationType;
@@ -228,10 +274,14 @@ export interface PlatformNotificationDto {
   isRead: boolean;
   tenantId: string | null;
   applicationId: string | null;
+  ticketId?: string | null;
+  orderId?: string | null;
 }
 
 export interface UpdateTenantStatusRequest {
   status: TenantStatus;
+  reason: string;
+  currentPassword: string;
 }
 
 export interface LocationDto {
@@ -607,13 +657,13 @@ export interface PlatformSettingsStatus {
 export type BillingProvider = 'vnpay' | 'momo';
 export interface PlanDto {
   id: string; code: string; version: number; displayName: string;
-  priceVnd: number; currency: 'VND'; activeStaffLimit: number; monthlyBookingLimit: number | null;
+  priceVnd: number; currency: 'VND'; activeStaffLimit: number; monthlyBookingLimit: number | null; appointmentRemindersEnabled: boolean; monthlyBookingReportsEnabled: boolean;
   sortOrder: number; features: string[];
 }
 export interface PlatformPlanDto extends PlanDto { isActive: boolean; subscriptionCount: number; }
 export interface UpsertPlanRequest {
   code: string; displayName: string; priceVnd: number; activeStaffLimit: number;
-  monthlyBookingLimit: number | null; sortOrder: number; features: string[];
+  monthlyBookingLimit: number | null; sortOrder: number; features: string[]; appointmentRemindersEnabled: boolean; monthlyBookingReportsEnabled: boolean;
 }
 export interface AssignTenantPlanRequest { planId: string; note: string; currentPassword: string; }
 export interface TenantBillingDto {
@@ -632,7 +682,7 @@ export interface BillingOrderDto {
 
 export interface PlatformBillingFilters {
   search?: string; status?: string; provider?: BillingProvider; planCode?: string;
-  from?: string; to?: string; page?: number; pageSize?: number;
+  from?: string; to?: string; needsAction?: boolean; page?: number; pageSize?: number;
 }
 export interface PlatformBillingSummaryDto {
   activeSubscriptions: number; pastDueSubscriptions: number; expiredSubscriptions: number;
@@ -661,6 +711,7 @@ export interface PlatformBillingOrderDto {
   status: BillingOrderDto['status']; createdAt: string; expiresAt: string; paidAt: string | null;
   attempt: { status: string; transactionReference: string | null; createdAt: string; completedAt: string | null } | null;
   webhook: { status: string; signatureVerified: boolean; receivedAt: string; processedAt: string | null } | null;
+  reconciliation?: { outcome: string; message: string | null; requestedAt: string; completedAt: string | null } | null;
   refund: { id: string; status: 'started' | 'pending' | 'succeeded' | 'failed' | 'unknown'; amountVnd: number; reason: string; providerReference: string | null; message: string | null; requestedAt: string; completedAt: string | null } | null;
 }
 export interface PlatformBillingOrderPageDto {

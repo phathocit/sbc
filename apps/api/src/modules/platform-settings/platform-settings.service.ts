@@ -21,7 +21,7 @@ import { eq, sql } from 'drizzle-orm';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { User } from '@sbc/database';
 import { PasswordService } from '../../common/crypto/password.service';
-import { platformAdmins, platformSettings } from '../../../../../packages/database/dist/schema/index.js';
+import { platformAdmins, platformSettings, platformAdminAuditEvents } from '../../../../../packages/database/dist/schema/index.js';
 import { db } from '../../database';
 import { decryptSystemSettings, encryptSystemSettings, systemSettingsMasterKey } from './system-settings.crypto';
 
@@ -554,6 +554,9 @@ export class PlatformSettingsService {
         target: platformSettings.id,
         set: { ciphertext: encrypted.ciphertext, iv: encrypted.iv, authTag: encrypted.authTag, updatedBy: user.id, updatedAt: new Date() },
       });
+      const sections = [input.smtp && 'smtp', input.publicAppUrl !== undefined && 'publicAppUrl', input.guestTokenKey && 'guestTokenKey', input.paymentProviders?.vnpay && 'vnpay', input.paymentProviders?.momo && 'momo'].filter(Boolean);
+      await tx.insert(platformAdminAuditEvents).values({ actorUserId: user.id, entityType: 'settings', entityId: 'platform',
+        action: 'settings.updated', before: { configured: Boolean(row) }, after: { sections } });
     });
     return this.safeSettings();
   }

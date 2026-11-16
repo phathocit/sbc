@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, varchar, boolean, timestamp, foreignKey, check, index, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, varchar, boolean, timestamp, foreignKey, check, index, jsonb, bigint, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { tenants } from './tenants.js';
 
@@ -7,10 +7,12 @@ export const tenantTelegramIntegrations = pgTable('tenant_telegram_integrations'
   botTokenCiphertext: text('bot_token_ciphertext').notNull(),
   botTokenIv: varchar('bot_token_iv', { length: 32 }).notNull(),
   botTokenAuthTag: varchar('bot_token_auth_tag', { length: 32 }).notNull(),
+  botId: varchar('bot_id', { length: 32 }),
   botUsername: varchar('bot_username', { length: 64 }),
   chatId: varchar('chat_id', { length: 32 }),
   chatTitle: varchar('chat_title', { length: 255 }),
   chatType: varchar('chat_type', { length: 16 }),
+  topicThreads: jsonb('topic_threads').$type<Record<string, number>>().notNull().default(sql`'{}'::jsonb`),
   enabled: boolean('enabled').notNull().default(false),
   status: varchar('status', { length: 24 }).notNull().default('saved'),
   lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
@@ -24,12 +26,14 @@ export const tenantTelegramIntegrations = pgTable('tenant_telegram_integrations'
   candidateChats: jsonb('candidate_chats').$type<Array<{ chatId: string; title: string | null; type: 'group' | 'supergroup' }>>().notNull().default(sql`'[]'::jsonb`),
   lastDiscoveryAt: timestamp('last_discovery_at', { withTimezone: true }),
   pollingUntil: timestamp('polling_until', { withTimezone: true }),
+  updateOffset: bigint('update_offset', { mode: 'number' }).notNull().default(0),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   foreignKey({ name: 'tenant_telegram_integrations_tenant_fk', columns: [table.tenantId], foreignColumns: [tenants.id] }).onDelete('cascade'),
   check('tenant_telegram_integrations_status_check', sql`${table.status} in ('saved', 'verified', 'failed')`),
   check('tenant_telegram_integrations_chat_type_check', sql`${table.chatType} is null or ${table.chatType} in ('group', 'supergroup')`),
   index('tenant_telegram_integrations_enabled_idx').on(table.enabled, table.status),
+  uniqueIndex('tenant_telegram_integrations_bot_uidx').on(table.botId).where(sql`${table.botId} is not null`),
 ]);
 
 export type TenantTelegramIntegration = typeof tenantTelegramIntegrations.$inferSelect;

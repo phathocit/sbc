@@ -18,7 +18,8 @@ export async function publishTenantNotification(
   const [notification] = await tx.insert(tenantNotifications).values({ tenantId, type, title, description, actionPath }).returning({ id: tenantNotifications.id });
   const [integration] = await tx.select({ enabled: tenantTelegramIntegrations.enabled, status: tenantTelegramIntegrations.status })
     .from(tenantTelegramIntegrations).where(eq(tenantTelegramIntegrations.tenantId, tenantId)).limit(1);
-  if (integration?.enabled && integration.status === 'verified' && notification) {
+  // Tenant groups are for appointment operations. Payment details stay in the authenticated workspace.
+  if (integration?.enabled && integration.status === 'verified' && notification && type.startsWith('booking_')) {
     await tx.insert(outboxMessages).values({ tenantId, eventType: 'tenant.telegram.notification.requested', payload: { notificationId: notification.id, ...(telegramDetails ? { telegramDetails } : {}) } });
   }
   await tx.execute(sql`select pg_notify('tenant_notifications', ${tenantId})`);

@@ -115,7 +115,7 @@ export default function GuestManagePage() {
 		setSlots([]);
 		if (!booking || !nextDate) return;
 		try {
-			setSlots(await api.publicAvailability(slug, booking.serviceId, nextDate));
+			setSlots(await api.publicAvailability(slug, [booking.serviceId], nextDate));
 		} catch (cause) {
 			setError(
 				cause instanceof Error ? cause.message : 'Không tải được giờ trống.',
